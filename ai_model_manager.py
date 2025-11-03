@@ -8,7 +8,9 @@ import logging
 from logging.handlers import RotatingFileHandler
 from collections import deque
 import requests
-from utils.mock_data import generate_sample_training_file  # your mock data generator
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
 # -----------------------------
 # Paths & Constants
@@ -61,7 +63,11 @@ def start_server():
         print("AI server already running.")
         return
     with LOG_FILE.open("a") as log_file:
-        process = subprocess.Popen(UVICORN_CMD, stdout=log_file, stderr=log_file)
+        process = subprocess.Popen(
+            UVICORN_CMD,
+            stdout=log_file,
+            stderr=log_file
+        )
     PID_FILE.write_text(str(process.pid))
     print(f"AI server started with PID {process.pid}, logging to {LOG_FILE}")
 
@@ -96,10 +102,48 @@ def tail_log(n=10):
         print(line, end='')
 
 # -----------------------------
-# API Interaction Functions
+# Sample Data Generation
+# -----------------------------
+def generate_sample_training_file(training_dir: Path, n_rows=500):
+    training_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = training_dir / f"sample_option_training_{timestamp}.csv"
+
+    df = pd.DataFrame({
+        "optionType": np.random.randint(0,2,size=n_rows),
+        "strikePrice": np.random.uniform(10,100,size=n_rows),
+        "lastPrice": np.random.uniform(10,100,size=n_rows),
+        "bid": np.random.uniform(10,100,size=n_rows),
+        "ask": np.random.uniform(10,100,size=n_rows),
+        "bidSize": np.random.randint(1,100,size=n_rows),
+        "askSize": np.random.randint(1,100,size=n_rows),
+        "volume": np.random.randint(0,1000,size=n_rows),
+        "openInterest": np.random.randint(0,1000,size=n_rows),
+        "nearPrice": np.random.uniform(10,100,size=n_rows),
+        "inTheMoney": np.random.randint(0,2,size=n_rows),
+        "delta": np.random.uniform(-1,1,size=n_rows),
+        "gamma": np.random.uniform(0,0.1,size=n_rows),
+        "theta": np.random.uniform(-0.1,0,size=n_rows),
+        "vega": np.random.uniform(0,0.1,size=n_rows),
+        "rho": np.random.uniform(0,0.1,size=n_rows),
+        "iv": np.random.uniform(0.1,1.0,size=n_rows),
+        "spread": np.random.uniform(0,5,size=n_rows),
+        "midPrice": np.random.uniform(10,100,size=n_rows),
+        "moneyness": np.random.uniform(0,2,size=n_rows),
+        "daysToExpiration": np.random.randint(1,30,size=n_rows),
+        # target columns
+        "predicted_return": np.random.uniform(-0.1,0.2,size=n_rows),
+        "predicted_hold_days": np.random.randint(1,15,size=n_rows)
+    })
+
+    df.to_csv(file_path, index=False)
+    print(f"✅ Generated sample training data: {file_path} ({n_rows} rows)")
+    return file_path
+
+# -----------------------------
+# API Upload Functions
 # -----------------------------
 def upload_sample_data(auto_train=True):
-    TRAINING_DIR.mkdir(exist_ok=True)
     sample_file = generate_sample_training_file(TRAINING_DIR)
     url = f"http://127.0.0.1:{UVICORN_PORT}/train/upload"
     with open(sample_file, "rb") as f:
@@ -111,29 +155,22 @@ def upload_sample_data(auto_train=True):
         except requests.exceptions.RequestException as e:
             print(f"Error uploading sample data: {e}")
 
-def upload_custom_csv(file_path: Path, auto_train=True):
-    if not file_path.exists():
-        print(f"File {file_path} does not exist.")
+def upload_custom_csv():
+    file_path = input("Enter path to CSV file: ").strip()
+    if not Path(file_path).exists():
+        print("File not found.")
         return
     url = f"http://127.0.0.1:{UVICORN_PORT}/train/upload"
-    with file_path.open("rb") as f:
+    with open(file_path, "rb") as f:
         files = {"file": f}
-        data = {"auto_train": str(auto_train).lower()}
+        data = {"auto_train": "true"}
         try:
             resp = requests.post(url, files=files, data=data)
             print(resp.json())
         except requests.exceptions.RequestException as e:
-            print(f"Error uploading CSV: {e}")
+            print(f"Error uploading custom CSV: {e}")
 
-def train_accumulated_data():
-    url = f"http://127.0.0.1:{UVICORN_PORT}/train"
-    try:
-        resp = requests.post(url)
-        print(resp.json())
-    except requests.exceptions.RequestException as e:
-        print(f"Error training accumulated data: {e}")
-
-def run_prediction():
+def run_prediction_model():
     url = f"http://127.0.0.1:{UVICORN_PORT}/predict"
     payload = {
         "features": {
@@ -148,7 +185,7 @@ def run_prediction():
         resp = requests.post(url, json=payload)
         print(resp.json())
     except requests.exceptions.RequestException as e:
-        print(f"Error running prediction: {e}")
+        print(f"Error making prediction: {e}")
 
 # -----------------------------
 # CLI Menu
@@ -178,12 +215,16 @@ def main():
         elif choice == "5":
             upload_sample_data()
         elif choice == "6":
-            file_path = input("Enter path to CSV file: ").strip()
-            upload_custom_csv(Path(file_path))
+            upload_custom_csv()
         elif choice == "7":
-            train_accumulated_data()
+            url = f"http://127.0.0.1:{UVICORN_PORT}/train"
+            try:
+                resp = requests.post(url)
+                print(resp.json())
+            except requests.exceptions.RequestException as e:
+                print(f"Error training accumulated data: {e}")
         elif choice == "8":
-            run_prediction()
+            run_prediction_model()
         elif choice == "9":
             break
         else:
