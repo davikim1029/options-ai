@@ -1,0 +1,11 @@
+logs/
+data/
+__pycache__/
+.vscode/
+.venv/
+*.csv
+*.pyc
+*DS_Store
+*.log
+staging.py
+*.pkl

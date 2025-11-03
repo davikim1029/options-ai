@@ -1,0 +1,15 @@
+scikit-learn
+numpy
+joblib
+python-dateutil
+fastapi
+pydantic
+uvicorn
+setuptools 
+wheel
+pandas   
+lightgbm 
+torch 
+tqdm
+python-multipart
+requests
