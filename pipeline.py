@@ -8,7 +8,7 @@ from datetime import datetime
 # -----------------------------
 # Configuration
 # -----------------------------
-DB_PATH = Path("../option_data_project/database/options.db")  # adjust path
+DB_PATH = Path("/home/dkim/GitHub/options/option-file-server/database/options.db")  # adjust path
 TRAINING_DIR = Path("training")
 AI_SERVER_PORT = 8100
 MIN_NEW_OPTIONS = 20  # number of new completed options before creating a file
