@@ -5,6 +5,9 @@ from pathlib import Path
 import requests
 from datetime import datetime
 import os
+from logger.logger_singleton import getLogger
+
+logger = getLogger()
 
 # -----------------------------
 # Configuration
@@ -41,7 +44,7 @@ def fetch_new_lifespans(threshold=MIN_NEW_OPTIONS):
     conn.close()
     
     if len(rows) < threshold:
-        print(f"Not enough new options: {len(rows)}/{threshold}")
+        logger.logMessage(f"Not enough new options: {len(rows)}/{threshold}")
         return None
     return pd.DataFrame(rows, columns=columns)
 
@@ -111,7 +114,7 @@ def save_csv_for_training(data):
     file_path = TRAINING_DIR / f"lifespan_training_{timestamp}.csv"
     df = pd.DataFrame(rows)
     df.to_csv(file_path, index=False)
-    print(f"Training CSV saved to {file_path}")
+    logger.logMessage(f"Training CSV saved to {file_path}")
     return file_path
 
 def upload_to_ai_server(csv_path, auto_train=True):
@@ -121,9 +124,9 @@ def upload_to_ai_server(csv_path, auto_train=True):
         data = {"auto_train": str(auto_train).lower()}
         try:
             resp = requests.post(url, files=files, data=data)
-            print(resp.json())
+            logger.logMessage(resp.json())
         except requests.exceptions.RequestException as e:
-            print(f"Error uploading training file: {e}")
+            logger.logMessage(f"Error uploading training file: {e}")
 
 def mark_processed(df):
     conn = sqlite3.connect(DB_PATH)

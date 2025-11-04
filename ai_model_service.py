@@ -13,6 +13,9 @@ from sklearn.model_selection import train_test_split
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
+from logger.logger_singleton import getLogger
+
+logger = getLogger()
 
 app = FastAPI(title="Hybrid AI Model Service")
 
@@ -93,7 +96,7 @@ def save_model(model, scaler):
     joblib.dump(scaler, scaler_file)
     model_file.replace(MODEL_PATH)
     scaler_file.replace(SCALER_PATH)
-    print(f"Saved hybrid model -> {model_file}")
+    logger.logMessage(f"Saved hybrid model -> {model_file}")
 
 def append_accumulated_data(new_df: pd.DataFrame):
     TRAINING_DIR.mkdir(exist_ok=True)
@@ -105,7 +108,7 @@ def append_accumulated_data(new_df: pd.DataFrame):
     # drop rows where any target is NaN
     combined = combined.dropna(subset=TARGET_COLUMNS).reset_index(drop=True)
     combined.to_csv(ACCUMULATED_DATA_PATH, index=False)
-    print(f"📈 Accumulated dataset now has {len(combined)} rows.")
+    logger.logMessage(f"📈 Accumulated dataset now has {len(combined)} rows.")
     return combined
     
 # -----------------------------
@@ -142,7 +145,7 @@ def train_hybrid_model(df: pd.DataFrame):
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        print(f"Epoch {epoch+1}/{EPOCHS} | Loss: {total_loss/len(dataloader):.6f}")
+        logger.logMessage(f"Epoch {epoch+1}/{EPOCHS} | Loss: {total_loss/len(dataloader):.6f}")
 
     # Save hybrid
     hybrid_model = {

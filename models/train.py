@@ -5,6 +5,9 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from models.model_core import OptionTransformerModel
+from logger.logger_singleton import getLogger
+
+logger = getLogger()
 
 MODEL_PATH = "model/option_transformer.pt"
 
@@ -49,7 +52,7 @@ def train_model(data_path="data/mock_option_data.csv", epochs=25, batch_size=32)
             optimizer.step()
             total_loss += loss.item()
 
-        print(f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(loader):.4f}")
+        logger.logMessage(f"Epoch {epoch+1}/{epochs} - Loss: {total_loss/len(loader):.4f}")
 
     torch.save(model.state_dict(), MODEL_PATH)
-    print(f"✅ Model trained and saved to {MODEL_PATH}")
+    logger.logMessage(f"✅ Model trained and saved to {MODEL_PATH}")

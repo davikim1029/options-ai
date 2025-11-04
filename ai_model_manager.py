@@ -11,6 +11,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from logger.logger_singleton import getLogger
 
 # -----------------------------
 # Paths & Constants
@@ -36,13 +37,7 @@ UVICORN_CMD = [
 # -----------------------------
 # Setup Logger
 # -----------------------------
-logger = logging.getLogger("AIModelManager")
-logger.setLevel(logging.INFO)
-LOG_FILE.parent.mkdir(exist_ok=True)
-handler = RotatingFileHandler(LOG_FILE, maxBytes=MAX_LOG_SIZE, backupCount=BACKUP_COUNT)
-formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+logger = getLogger()
 
 # -----------------------------
 # Server Control Functions
@@ -60,7 +55,7 @@ def is_server_running():
 
 def start_server():
     if is_server_running():
-        print("AI server already running.")
+        logger.logMessage("AI server already running.")
         return
     with LOG_FILE.open("a") as log_file:
         process = subprocess.Popen(
@@ -69,37 +64,37 @@ def start_server():
             stderr=log_file
         )
     PID_FILE.write_text(str(process.pid))
-    print(f"AI server started with PID {process.pid}, logging to {LOG_FILE}")
+    logger.logMessage(f"AI server started with PID {process.pid}, logging to {LOG_FILE}")
 
 def stop_server():
     if not PID_FILE.exists():
-        print("AI server not running.")
+        logger.logMessage("AI server not running.")
         return
     pid = int(PID_FILE.read_text())
     try:
         os.kill(pid, signal.SIGTERM)
-        print(f"Sent SIGTERM to PID {pid}")
+        logger.logMessage(f"Sent SIGTERM to PID {pid}")
         time.sleep(1)
     except ProcessLookupError:
-        print(f"No process with PID {pid} found.")
+        logger.logMessage(f"No process with PID {pid} found.")
     PID_FILE.unlink(missing_ok=True)
-    print("AI server stopped.")
+    logger.logMessage("AI server stopped.")
 
 def check_server():
     if is_server_running():
         pid = int(PID_FILE.read_text())
-        print(f"AI server running with PID {pid}")
+        logger.logMessage(f"AI server running with PID {pid}")
     else:
-        print("AI server is not running.")
+        logger.logMessage("AI server is not running.")
 
 def tail_log(n=10):
     if not LOG_FILE.exists():
-        print("Log file does not exist.")
+        logger.logMessage("Log file does not exist.")
         return
     with LOG_FILE.open("r") as f:
         last_lines = deque(f, maxlen=n)
     for line in last_lines:
-        print(line, end='')
+        logger.logMessage(line, end='')
 
 # -----------------------------
 # Sample Data Generation
@@ -137,7 +132,7 @@ def generate_sample_training_file(training_dir: Path, n_rows=500):
     })
 
     df.to_csv(file_path, index=False)
-    print(f"✅ Generated sample training data: {file_path} ({n_rows} rows)")
+    logger.logMessage(f"✅ Generated sample training data: {file_path} ({n_rows} rows)")
     return file_path
 
 # -----------------------------
@@ -151,14 +146,14 @@ def upload_sample_data(auto_train=True):
         data = {"auto_train": str(auto_train).lower()}
         try:
             resp = requests.post(url, files=files, data=data)
-            print(resp.json())
+            logger.logMessage(resp.json())
         except requests.exceptions.RequestException as e:
-            print(f"Error uploading sample data: {e}")
+            logger.logMessage(f"Error uploading sample data: {e}")
 
 def upload_custom_csv():
     file_path = input("Enter path to CSV file: ").strip()
     if not Path(file_path).exists():
-        print("File not found.")
+        logger.logMessage("File not found.")
         return
     url = f"http://127.0.0.1:{UVICORN_PORT}/train/upload"
     with open(file_path, "rb") as f:
@@ -166,9 +161,9 @@ def upload_custom_csv():
         data = {"auto_train": "true"}
         try:
             resp = requests.post(url, files=files, data=data)
-            print(resp.json())
+            logger.logMessage(resp.json())
         except requests.exceptions.RequestException as e:
-            print(f"Error uploading custom CSV: {e}")
+            logger.logMessage(f"Error uploading custom CSV: {e}")
 
 def run_prediction_model():
     url = f"http://127.0.0.1:{UVICORN_PORT}/predict"
@@ -183,25 +178,25 @@ def run_prediction_model():
     }
     try:
         resp = requests.post(url, json=payload)
-        print(resp.json())
+        logger.logMessage(resp.json())
     except requests.exceptions.RequestException as e:
-        print(f"Error making prediction: {e}")
+        logger.logMessage(f"Error making prediction: {e}")
 
 # -----------------------------
 # CLI Menu
 # -----------------------------
 def main():
     while True:
-        print("\nAI Model Manager")
-        print("1) Start AI Server")
-        print("2) Stop AI Server")
-        print("3) Check Server Status")
-        print("4) Tail last 10 log lines")
-        print("5) Upload sample training data")
-        print("6) Upload custom CSV")
-        print("7) Train accumulated data")
-        print("8) Run test prediction")
-        print("9) Exit")
+        logger.logMessage("\nAI Model Manager")
+        logger.logMessage("1) Start AI Server")
+        logger.logMessage("2) Stop AI Server")
+        logger.logMessage("3) Check Server Status")
+        logger.logMessage("4) Tail last 10 log lines")
+        logger.logMessage("5) Upload sample training data")
+        logger.logMessage("6) Upload custom CSV")
+        logger.logMessage("7) Train accumulated data")
+        logger.logMessage("8) Run test prediction")
+        logger.logMessage("9) Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
@@ -220,15 +215,15 @@ def main():
             url = f"http://127.0.0.1:{UVICORN_PORT}/train"
             try:
                 resp = requests.post(url)
-                print(resp.json())
+                logger.logMessage(resp.json())
             except requests.exceptions.RequestException as e:
-                print(f"Error training accumulated data: {e}")
+                logger.logMessage(f"Error training accumulated data: {e}")
         elif choice == "8":
             run_prediction_model()
         elif choice == "9":
             break
         else:
-            print("Invalid choice, try again.")
+            logger.logMessage("Invalid choice, try again.")
 
 if __name__ == "__main__":
     main()

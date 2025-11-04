@@ -3,6 +3,9 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 import random
+from logger.logger_singleton import getLogger
+
+logger = getLogger()
 
 def generate_sample_training_file(output_dir: Path, n_rows: int = 500) -> Path:
     """
@@ -66,7 +69,7 @@ def generate_sample_training_file(output_dir: Path, n_rows: int = 500) -> Path:
     )
 
     df.to_csv(file_path, index=False)
-    print(f"✅ Generated sample training data: {file_path} ({n_rows} rows)")
+    logger.logMessage(f"✅ Generated sample training data: {file_path} ({n_rows} rows)")
     return file_path
 
 
