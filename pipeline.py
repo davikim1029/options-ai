@@ -28,7 +28,7 @@ TRAINING_DIR.mkdir(exist_ok=True)
 # -----------------------------
 # Helper Functions
 # -----------------------------
-def fetch_new_lifespans(threshold=MIN_NEW_OPTIONS):
+def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
     """Fetch unprocessed completed options from the database."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
