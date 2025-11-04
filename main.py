@@ -10,13 +10,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from logger.logger_singleton import getLogger
+from logging import FileHandler
 from pipeline import run_pipeline
 
 # -----------------------------
 # Paths & Constants
 # -----------------------------
 PID_FILE = Path("ai_model_server.pid")
-LOG_FILE = Path("logs/ai_model_server.log")
 TRAINING_DIR = Path("training")
 MODEL_SERVER_SCRIPT = "ai_model_service:app"  # FastAPI server module
 UVICORN_PORT = 8100
@@ -37,7 +37,11 @@ UVICORN_CMD = [
 # Setup Logger
 # -----------------------------
 logger = getLogger()
-
+log_file = Path("ai_model_server.log")
+for handler in logger.logger.handlers:
+    if isinstance(handler, FileHandler):
+        log_file = Path(handler.baseFilename)
+        break # Assuming you only care about the first FileHandler found
 # -----------------------------
 # Server Control Functions
 # -----------------------------
@@ -56,14 +60,16 @@ def start_server():
     if is_server_running():
         print("AI server already running.")
         return
-    with LOG_FILE.open("a") as log_file:
+
+    with open(log_file, "a") as f:
         process = subprocess.Popen(
             UVICORN_CMD,
-            stdout=log_file,
-            stderr=log_file
+            stdout=f,
+            stderr=f
         )
+
     PID_FILE.write_text(str(process.pid))
-    logger.logMessage(f"AI server started with PID {process.pid}, logging to {LOG_FILE}")
+    logger.logMessage(f"AI server started with PID {process.pid}, logging to {log_file}")
 
 def stop_server():
     if not PID_FILE.exists():
@@ -87,10 +93,10 @@ def check_server():
         print("AI server is not running.")
 
 def tail_log(n=10):
-    if not LOG_FILE.exists():
+    if not log_file.exists():
         print("Log file does not exist.")
         return
-    with LOG_FILE.open("r") as f:
+    with log_file.open("r") as f:
         last_lines = deque(f, maxlen=n)
     for line in last_lines:
         print(line, end='')
