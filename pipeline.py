@@ -34,11 +34,16 @@ def fetch_new_lifespans(threshold=MIN_NEW_OPTIONS):
     c = conn.cursor()
     
     # Make sure we have a 'processed' column
-    c.execute("ALTER TABLE IF NOT EXISTS option_lifespans ADD COLUMN processed INTEGER DEFAULT 0")
-    conn.commit()
+    c.execute("PRAGMA table_info(option_lifetimes)")
+    columns_info = c.fetchall()
+    existing_columns = [col[1] for col in columns_info]  # col[1] is the column name
+
+    if "processed" not in existing_columns:
+        c.execute("ALTER TABLE option_lifetimes ADD COLUMN processed INTEGER DEFAULT 0")
+        conn.commit()
     
     # Select unprocessed options
-    c.execute("SELECT * FROM option_lifespans WHERE processed=0")
+    c.execute("SELECT * FROM option_lifetimes WHERE processed=0")
     rows = c.fetchall()
     columns = [desc[0] for desc in c.description]
     conn.close()
@@ -50,7 +55,7 @@ def fetch_new_lifespans(threshold=MIN_NEW_OPTIONS):
 
 def transform_for_fusion(df):
     """
-    Transform lifespan data into the format expected by the fusion AI model.
+    Transform lifetime data into the format expected by the fusion AI model.
     Each option becomes a single row containing:
       - static features: optionType, strikePrice, moneyness
       - sequence: snapshot series flattened (lastPrice, delta, gamma, etc.)
@@ -111,7 +116,7 @@ def save_csv_for_training(data):
         rows.append(flat_row)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = TRAINING_DIR / f"lifespan_training_{timestamp}.csv"
+    file_path = TRAINING_DIR / f"lifetime_training_{timestamp}.csv"
     df = pd.DataFrame(rows)
     df.to_csv(file_path, index=False)
     logger.logMessage(f"Training CSV saved to {file_path}")
@@ -132,7 +137,7 @@ def mark_processed(df):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     for osi in df["osiKey"]:
-        c.execute("UPDATE option_lifespans SET processed=1 WHERE osiKey=?", (osi,))
+        c.execute("UPDATE option_lifetimes SET processed=1 WHERE osiKey=?", (osi,))
     conn.commit()
     conn.close()
 
@@ -140,7 +145,7 @@ def mark_processed(df):
 # Main Pipeline
 # -----------------------------
 def run_pipeline():
-    df = fetch_new_lifespans()
+    df = fetch_new_lifetimes()
     if df is None:
         return
     processed_data = transform_for_fusion(df)
