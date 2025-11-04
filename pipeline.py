@@ -4,11 +4,18 @@ import pandas as pd
 from pathlib import Path
 import requests
 from datetime import datetime
+import os
 
 # -----------------------------
 # Configuration
 # -----------------------------
-DB_PATH = Path("/home/dkim/GitHub/options/option-file-server/database/options.db")  # adjust path
+# Current file directory
+here = os.path.dirname(os.path.abspath(__file__))
+
+# Go up one level (from options-alert to options) and then into option-file-server
+db_path = os.path.join(here, "..", "option-file-server", "database", "options.db")
+
+DB_PATH = os.path.normpath(db_path)
 TRAINING_DIR = Path("training")
 AI_SERVER_PORT = 8100
 MIN_NEW_OPTIONS = 20  # number of new completed options before creating a file
