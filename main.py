@@ -4,14 +4,13 @@ import subprocess
 import signal
 import time
 from pathlib import Path
-import logging
-from logging.handlers import RotatingFileHandler
 from collections import deque
 import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime
 from logger.logger_singleton import getLogger
+from pipeline import run_pipeline
 
 # -----------------------------
 # Paths & Constants
@@ -196,7 +195,8 @@ def main():
         print("6) Upload custom CSV")
         print("7) Train accumulated data")
         print("8) Run test prediction")
-        print("9) Exit")
+        print("9) Run Pipeline")
+        print("10) Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
@@ -221,6 +221,8 @@ def main():
         elif choice == "8":
             run_prediction_model()
         elif choice == "9":
+            run_pipeline()
+        elif choice == "10":
             break
         else:
             print("Invalid choice, try again.")

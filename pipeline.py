@@ -147,6 +147,3 @@ def run_pipeline():
     csv_path = save_csv_for_training(processed_data)
     upload_to_ai_server(csv_path)
     mark_processed(df)
-
-if __name__=="__main__":
-    run_pipeline()
