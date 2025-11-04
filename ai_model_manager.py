@@ -17,7 +17,7 @@ from logger.logger_singleton import getLogger
 # Paths & Constants
 # -----------------------------
 PID_FILE = Path("ai_model_server.pid")
-LOG_FILE = Path("ai_model_server.log")
+LOG_FILE = Path("logs/ai_model_server.log")
 TRAINING_DIR = Path("training")
 MODEL_SERVER_SCRIPT = "ai_model_service:app"  # FastAPI server module
 UVICORN_PORT = 8100
@@ -55,7 +55,7 @@ def is_server_running():
 
 def start_server():
     if is_server_running():
-        logger.logMessage("AI server already running.")
+        print("AI server already running.")
         return
     with LOG_FILE.open("a") as log_file:
         process = subprocess.Popen(
@@ -68,7 +68,7 @@ def start_server():
 
 def stop_server():
     if not PID_FILE.exists():
-        logger.logMessage("AI server not running.")
+        print("AI server not running.")
         return
     pid = int(PID_FILE.read_text())
     try:
@@ -83,18 +83,18 @@ def stop_server():
 def check_server():
     if is_server_running():
         pid = int(PID_FILE.read_text())
-        logger.logMessage(f"AI server running with PID {pid}")
+        print(f"AI server running with PID {pid}")
     else:
-        logger.logMessage("AI server is not running.")
+        print("AI server is not running.")
 
 def tail_log(n=10):
     if not LOG_FILE.exists():
-        logger.logMessage("Log file does not exist.")
+        print("Log file does not exist.")
         return
     with LOG_FILE.open("r") as f:
         last_lines = deque(f, maxlen=n)
     for line in last_lines:
-        logger.logMessage(line, end='')
+        print(line, end='')
 
 # -----------------------------
 # Sample Data Generation
@@ -187,16 +187,16 @@ def run_prediction_model():
 # -----------------------------
 def main():
     while True:
-        logger.logMessage("\nAI Model Manager")
-        logger.logMessage("1) Start AI Server")
-        logger.logMessage("2) Stop AI Server")
-        logger.logMessage("3) Check Server Status")
-        logger.logMessage("4) Tail last 10 log lines")
-        logger.logMessage("5) Upload sample training data")
-        logger.logMessage("6) Upload custom CSV")
-        logger.logMessage("7) Train accumulated data")
-        logger.logMessage("8) Run test prediction")
-        logger.logMessage("9) Exit")
+        print("\nAI Model Manager")
+        print("1) Start AI Server")
+        print("2) Stop AI Server")
+        print("3) Check Server Status")
+        print("4) Tail last 10 log lines")
+        print("5) Upload sample training data")
+        print("6) Upload custom CSV")
+        print("7) Train accumulated data")
+        print("8) Run test prediction")
+        print("9) Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
@@ -215,15 +215,15 @@ def main():
             url = f"http://127.0.0.1:{UVICORN_PORT}/train"
             try:
                 resp = requests.post(url)
-                logger.logMessage(resp.json())
+                print(resp.json())
             except requests.exceptions.RequestException as e:
-                logger.logMessage(f"Error training accumulated data: {e}")
+                print(f"Error training accumulated data: {e}")
         elif choice == "8":
             run_prediction_model()
         elif choice == "9":
             break
         else:
-            logger.logMessage("Invalid choice, try again.")
+            print("Invalid choice, try again.")
 
 if __name__ == "__main__":
     main()
