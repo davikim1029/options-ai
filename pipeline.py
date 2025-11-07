@@ -29,7 +29,7 @@ TRAINING_DIR.mkdir(exist_ok=True)
 # Helper Functions
 # -----------------------------
 def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
-    """Fetch unprocessed completed options from the database."""
+    """Fetch unprocessed completed options from the database, enriched with totalSnapshots."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
@@ -41,17 +41,35 @@ def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
     if "processed" not in existing_columns:
         c.execute("ALTER TABLE option_lifetimes ADD COLUMN processed INTEGER DEFAULT 0")
         conn.commit()
-    
+
     # Select unprocessed options
     c.execute("SELECT * FROM option_lifetimes WHERE processed=0")
     rows = c.fetchall()
     columns = [desc[0] for desc in c.description]
-    conn.close()
-    
-    if len(rows) < threshold:
-        logger.logMessage(f"Not enough new options: {len(rows)}/{threshold}")
+    df = pd.DataFrame(rows, columns=columns)
+
+    # If no unprocessed data, bail early
+    if df.empty:
+        logger.logMessage("No new unprocessed lifetimes.")
+        conn.close()
         return None
-    return pd.DataFrame(rows, columns=columns)
+
+    # --- Enrich with totalSnapshots ---
+    snapshot_counts = pd.read_sql_query(
+        "SELECT osiKey, COUNT(*) as totalSnapshots FROM option_snapshots GROUP BY osiKey",
+        conn
+    )
+    df = df.merge(snapshot_counts, on="osiKey", how="left")
+    df["totalSnapshots"] = df["totalSnapshots"].fillna(0).astype(int)
+
+    conn.close()
+
+    # Check threshold
+    if len(df) < threshold:
+        logger.logMessage(f"Not enough new options: {len(df)}/{threshold}")
+        return None
+
+    return df
 
 def transform_for_fusion(df):
     """
@@ -62,12 +80,18 @@ def transform_for_fusion(df):
       - targets: recommendation, expectedHoldDays
     """
     processed_rows = []
+    skipped = 0
+
     for _, row in df.iterrows():
-        # Here, we simulate sequence by splitting totalSnapshots into equal parts
+        total_snaps = int(row.get("totalSnapshots") or 0)
+        if total_snaps <= 0:
+            skipped += 1
+            continue
+
         sequence_data = []
-        for i in range(int(row["totalSnapshots"])):
+        for i in range(total_snaps):
             sequence_data.append({
-                "lastPrice": row.get("startPrice") + i*(row.get("endPrice") - row.get("startPrice"))/row.get("totalSnapshots"),
+                "lastPrice": row.get("startPrice") + i * (row.get("endPrice") - row.get("startPrice")) / total_snaps if total_snaps > 0 else row.get("startPrice"),
                 "delta": row.get("avgDelta"),
                 "gamma": row.get("avgGamma"),
                 "theta": row.get("avgTheta"),
@@ -84,15 +108,18 @@ def transform_for_fusion(df):
                 "moneyness": row.get("avgMoneyness"),
                 "daysToExpiration": i
             })
+
         processed_rows.append({
-            **{
-                "osiKey": row["osiKey"],
-                "strikePrice": row["strikePrice"],
-                "optionType": row["optionType"],
-                "moneyness": row.get("avgMoneyness"),
-                "recommendation": row.get("totalChange"),  # e.g., total profit
-                "expectedHoldDays": (row.get("endDate") - row.get("startDate")).days if isinstance(row.get("endDate"), pd.Timestamp) else row.get("totalSnapshots")
-            },
+            "osiKey": row["osiKey"],
+            "strikePrice": row["strikePrice"],
+            "optionType": row["optionType"],
+            "moneyness": row.get("avgMoneyness"),
+            "recommendation": row.get("totalChange"),  # e.g. total profit
+            "expectedHoldDays": (
+                (row.get("endDate") - row.get("startDate")).days
+                if isinstance(row.get("endDate"), pd.Timestamp)
+                else total_snaps
+            ),
             "sequence": sequence_data
         })
     return processed_rows
