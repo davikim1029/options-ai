@@ -4,6 +4,9 @@ from pathlib import Path
 from datetime import datetime
 import random
 from logger.logger_singleton import getLogger
+import sqlite3
+import os
+
 
 logger = getLogger()
 
@@ -72,6 +75,54 @@ def generate_sample_training_file(output_dir: Path, n_rows: int = 500) -> Path:
     logger.logMessage(f"✅ Generated sample training data: {file_path} ({n_rows} rows)")
     return file_path
 
+
+
+def copy_all_snapshot_data():
+    # Current file directory
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # Go up one level (from options-alert to options) and then into option-file-server
+    db_path = os.path.join(here,"..", "..", "option-file-server", "database", "options.db")
+
+    DB_PATH = os.path.normpath(db_path)
+    insert_sql = """
+    INSERT INTO option_lifetimes (
+        osiKey, timestamp, symbol, optionType, strikePrice, lastPrice,
+        bid, ask, bidSize, askSize, volume, openInterest, nearPrice,
+        inTheMoney, delta, gamma, theta, vega, rho, iv,
+        daysToExpiration, spread, midPrice, moneyness, processed
+    )
+    SELECT
+        osiKey, timestamp, symbol, optionType, strikePrice, lastPrice,
+        bid, ask, bidSize, askSize, volume, openInterest, nearPrice,
+        inTheMoney, delta, gamma, theta, vega, rho, iv,
+        daysToExpiration, spread, midPrice, moneyness, 0
+    FROM option_snapshots;
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+
+        # Count rows before insert
+        cur.execute("SELECT COUNT(*) FROM option_lifetimes;")
+        before_count = cur.fetchone()[0]
+
+        # Execute the insert
+        cur.execute(insert_sql)
+        conn.commit()
+
+        # Count rows after insert
+        cur.execute("SELECT COUNT(*) FROM option_lifetimes;")
+        after_count = cur.fetchone()[0]
+
+        rows_inserted = after_count - before_count
+        print(f"Insert successful! {rows_inserted} rows added.")
+
+    except sqlite3.Error as e:
+        print(f"SQLite error: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 if __name__ == "__main__":
     # Quick manual test

@@ -12,6 +12,7 @@ from datetime import datetime
 from logger.logger_singleton import getLogger
 from logging import FileHandler
 from pipeline import run_pipeline
+from utils.mock_data import copy_all_snapshot_data
 
 # -----------------------------
 # Paths & Constants
@@ -202,7 +203,8 @@ def main():
         print("7) Train accumulated data")
         print("8) Run test prediction")
         print("9) Run Pipeline")
-        print("10) Exit")
+        print("10) Populate Lifetime data with all snapshots")
+        print("11) Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
@@ -229,6 +231,8 @@ def main():
         elif choice == "9":
             run_pipeline()
         elif choice == "10":
+            copy_all_snapshot_data()
+        elif choice == "11":
             break
         else:
             print("Invalid choice, try again.")

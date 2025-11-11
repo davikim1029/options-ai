@@ -5,7 +5,7 @@ from pathlib import Path
 import requests
 from datetime import datetime
 import os
-from logger.logger_singleton import getLogger
+from shared_options.log.logger_singleton import getLogger
 
 logger = getLogger()
 
@@ -56,7 +56,7 @@ def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
 
     # --- Enrich with totalSnapshots ---
     snapshot_counts = pd.read_sql_query(
-        "SELECT osiKey, COUNT(*) as totalSnapshots FROM option_snapshots GROUP BY osiKey",
+        "SELECT osiKey, COUNT(*) as totalSnapshots FROM option_lifetimes GROUP BY osiKey",
         conn
     )
     df = df.merge(snapshot_counts, on="osiKey", how="left")
@@ -73,100 +73,132 @@ def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
 
 def transform_for_fusion(df):
     """
-    Transform lifetime data into the format expected by the fusion AI model.
-    Each option becomes a single row containing:
-      - static features: optionType, strikePrice, moneyness
-      - sequence: snapshot series flattened (lastPrice, delta, gamma, etc.)
+    Transform the lifetime snapshot table into the format expected by the fusion AI model.
+
+    Each option (osiKey) becomes a single row containing:
+      - static features: strikePrice, optionType, moneyness
+      - sequence: ordered snapshots for all relevant features
       - targets: recommendation, expectedHoldDays
     """
     processed_rows = []
     skipped = 0
 
-    for _, row in df.iterrows():
-        total_snaps = int(row.get("totalSnapshots") or 0)
-        if total_snaps <= 0:
+    # Group all snapshots by osiKey
+    grouped = df.groupby("osiKey", sort=True)
+    total_groups = len(grouped)
+    logger.logMessage(f"{total_groups} options to process")
+    osi_cnt = 0
+    for osiKey, group in grouped:
+        group = group.sort_values("timestamp")
+        osi_cnt += 1
+        
+        # Ensure chronological order
+        if len(group) == 0:
             skipped += 1
             continue
-
+        # Sequence data for all snapshots
+        logger.logMessage(f"Processing option  {osiKey} | {osi_cnt}/{total_groups}")
         sequence_data = []
-        for i in range(total_snaps):
+        for _, snap in group.iterrows():
             sequence_data.append({
-                "lastPrice": row.get("startPrice") + i * (row.get("endPrice") - row.get("startPrice")) / total_snaps if total_snaps > 0 else row.get("startPrice"),
-                "delta": row.get("avgDelta"),
-                "gamma": row.get("avgGamma"),
-                "theta": row.get("avgTheta"),
-                "vega": row.get("avgVega"),
-                "rho": row.get("avgRho"),
-                "iv": row.get("avgIV"),
-                "bid": row.get("startPrice"),
-                "ask": row.get("endPrice"),
-                "bidSize": 0,
-                "askSize": 0,
-                "volume": row.get("avgVolume"),
-                "openInterest": row.get("avgOpenInterest"),
-                "midPrice": row.get("avgMidPrice"),
-                "moneyness": row.get("avgMoneyness"),
-                "daysToExpiration": i
+                "lastPrice": snap["lastPrice"],
+                "bid": snap["bid"],
+                "ask": snap["ask"],
+                "bidSize": snap["bidSize"],
+                "askSize": snap["askSize"],
+                "volume": snap["volume"],
+                "openInterest": snap["openInterest"],
+                "nearPrice": snap["nearPrice"],
+                "inTheMoney": snap["inTheMoney"],
+                "delta": snap["delta"],
+                "gamma": snap["gamma"],
+                "theta": snap["theta"],
+                "vega": snap["vega"],
+                "rho": snap["rho"],
+                "iv": snap["iv"],
+                "daysToExpiration": snap["daysToExpiration"],
+                "spread": snap["spread"],
+                "midPrice": snap["midPrice"],
+                "moneyness": snap["moneyness"]
             })
 
+        # Targets: we can compute recommendation as total profit/change across the lifetime
+        first_price = group.iloc[0]["lastPrice"]
+        last_price = group.iloc[-1]["lastPrice"]
+        recommendation = last_price - first_price  # simple placeholder; replace with your formula
+
+        expected_hold_days = len(group)
+
+        # Static features: take first snapshot (or compute averages if preferred)
+        first_snap = group.iloc[0]
+
         processed_rows.append({
-            "osiKey": row["osiKey"],
-            "strikePrice": row["strikePrice"],
-            "optionType": row["optionType"],
-            "moneyness": row.get("avgMoneyness"),
-            "recommendation": row.get("totalChange"),  # e.g. total profit
-            "expectedHoldDays": (
-                (row.get("endDate") - row.get("startDate")).days
-                if isinstance(row.get("endDate"), pd.Timestamp)
-                else total_snaps
-            ),
+            "osiKey": osiKey,
+            "strikePrice": first_snap["strikePrice"],
+            "optionType": first_snap["optionType"],
+            "moneyness": first_snap["moneyness"],
+            "recommendation": recommendation,
+            "expectedHoldDays": expected_hold_days,
             "sequence": sequence_data
         })
-    return processed_rows
 
+    logger.logMessage(f"Processed {len(processed_rows)} options, skipped {skipped} with no snapshots")
+    return processed_rows
+    
 def save_csv_for_training(data):
-    """Flatten and save as CSV for AI upload."""
+    """Flatten and save lifetime sequences as CSV for AI upload."""
     rows = []
+    logger.logMessage("Saving CSV")
     for entry in data:
         flat_row = {
             "osiKey": entry["osiKey"],
             "strikePrice": entry["strikePrice"],
             "optionType": entry["optionType"],
             "moneyness": entry["moneyness"],
-            "recommendation": entry["recommendation"],
-            "expectedHoldDays": entry["expectedHoldDays"]
+            "recommendation": entry.get("recommendation", 0),
+            "expectedHoldDays": entry.get("expectedHoldDays", len(entry["sequence"]))
         }
         # Flatten sequence data
         for idx, step in enumerate(entry["sequence"]):
             for k, v in step.items():
                 flat_row[f"{k}_{idx}"] = v
         rows.append(flat_row)
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    TRAINING_DIR.mkdir(exist_ok=True)
     file_path = TRAINING_DIR / f"lifetime_training_{timestamp}.csv"
     df = pd.DataFrame(rows)
     df.to_csv(file_path, index=False)
-    logger.logMessage(f"Training CSV saved to {file_path}")
+    logger.logMessage(f"Training CSV saved to {file_path} ({len(rows)} rows)")
     return file_path
 
+
 def upload_to_ai_server(csv_path, auto_train=True):
+    """Upload CSV to AI server for training."""
     url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
-    with open(csv_path,"rb") as f:
-        files = {"file": f}
-        data = {"auto_train": str(auto_train).lower()}
-        try:
+    logger.logMessage("Uploading...")
+    try:
+        with open(csv_path, "rb") as f:
+            files = {"file": f}
+            data = {"auto_train": str(auto_train).lower()}
             resp = requests.post(url, files=files, data=data)
-            logger.logMessage(resp.json())
-        except requests.exceptions.RequestException as e:
-            logger.logMessage(f"Error uploading training file: {e}")
+        resp.raise_for_status()
+        result = resp.json()
+        logger.logMessage(f"Upload result: {result}")
+        return result
+    except requests.exceptions.RequestException as e:
+        logger.logMessage(f"Error uploading training file: {e}")
+        return {"status": "error", "message": str(e)}
 
 def mark_processed(df):
+    logger.logMessage("Marking keys as processed")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     for osi in df["osiKey"]:
         c.execute("UPDATE option_lifetimes SET processed=1 WHERE osiKey=?", (osi,))
     conn.commit()
     conn.close()
+    logger.logMessage("Marked keys as processed")
 
 # -----------------------------
 # Main Pipeline
