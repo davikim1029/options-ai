@@ -1,3 +1,4 @@
+#main.py
 import sys
 import os
 import subprocess
@@ -9,6 +10,8 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import psutil
+import shutil
 from logger.logger_singleton import getLogger
 from logging import FileHandler
 from pipeline import run_pipeline
@@ -21,6 +24,10 @@ PID_FILE = Path("ai_model_server.pid")
 TRAINING_DIR = Path("training")
 MODEL_SERVER_SCRIPT = "ai_model_service:app"  # FastAPI server module
 UVICORN_PORT = 8100
+
+MAX_SERVER_MEMORY_MB = 2048
+CPU_CORE_FRACTION = 0.25  # use 25% of total cores
+
 
 MAX_LOG_SIZE = 5 * 1024 * 1024
 BACKUP_COUNT = 3
@@ -57,20 +64,48 @@ def is_server_running():
         PID_FILE.unlink(missing_ok=True)
         return False
 
+
 def start_server():
     if is_server_running():
         print("AI server already running.")
         return
 
+    # Determine CPU cores
+    total_cores = psutil.cpu_count(logical=True)
+    use_cores = max(1, total_cores // 4)  # Use up to 25% of cores
+    core_mask = ",".join(str(i) for i in range(use_cores))
+    
+    # Set memory limit (2 GB)
+    mem_limit_mb = 2048
+
+    # Check for 'taskset' availability
+    taskset_path = shutil.which("taskset")
+    if taskset_path:
+        prefix_cmd = [taskset_path, "-c", core_mask]
+    else:
+        prefix_cmd = []
+
+    # Prepare ulimit wrapper for memory
+    limit_cmd = [
+        "bash", "-c",
+        f"ulimit -v {mem_limit_mb * 1024}; exec " + " ".join(UVICORN_CMD)
+    ]
+
+    full_cmd = prefix_cmd + limit_cmd
+
     with open(log_file, "a") as f:
         process = subprocess.Popen(
-            UVICORN_CMD,
+            full_cmd,
             stdout=f,
-            stderr=f
+            stderr=f,
+            preexec_fn=os.setpgrp  # allows later clean kill
         )
 
     PID_FILE.write_text(str(process.pid))
-    logger.logMessage(f"AI server started with PID {process.pid}, logging to {log_file}")
+    logger.logMessage(
+        f"AI server started with PID {process.pid}, "
+        f"CPU cores: {core_mask}, memory limit: {mem_limit_mb} MB, log: {log_file}"
+    )
 
 def stop_server():
     if not PID_FILE.exists():
