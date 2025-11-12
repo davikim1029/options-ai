@@ -1,0 +1,50 @@
+# shared_utils/io_utils.py
+import pandas as pd
+import time
+from pathlib import Path
+from shared_options.log.logger_singleton import getLogger
+
+def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None):
+    """
+    Save a DataFrame or list of dictionaries to CSV in chunks to reduce I/O pressure.
+    
+    Parameters
+    ----------
+    data : pd.DataFrame or list of dict
+        The data to save.
+    output_path : str or Path
+        Path to save the CSV file.
+    chunksize : int
+        Number of rows per chunk.
+    delay : float
+        Seconds to wait between writing chunks.
+    logger : optional
+        Logger object with .logMessage() method.
+    """
+    # Convert list of dicts to DataFrame if needed
+    if isinstance(data, list):
+        data = pd.DataFrame(data)
+    elif not isinstance(data, pd.DataFrame):
+        raise ValueError(f"Unsupported data type: {type(data)}")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    total_rows = len(data)
+    if logger:
+        logger.logMessage(f"Saving {total_rows} rows to {output_path} in chunks of {chunksize}...")
+
+    # Write CSV in chunks
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        for start in range(0, total_rows, chunksize):
+            end = min(start + chunksize, total_rows)
+            chunk = data.iloc[start:end]
+            header = start == 0  # only write header for first chunk
+            chunk.to_csv(f, index=False, header=header, mode='a')
+            if logger:
+                logger.logMessage(f"Wrote rows {start}–{end} / {total_rows}")
+            time.sleep(delay)
+    
+    if logger:
+        logger.logMessage(f"CSV save completed: {output_path}")
+    return output_path

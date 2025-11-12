@@ -1,4 +1,3 @@
-import os
 import io
 import joblib
 import pandas as pd
@@ -8,12 +7,11 @@ from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, Form
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import SGDRegressor
-from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from logger.logger_singleton import getLogger
+from utils.utils import save_csv_safely
 
 logger = getLogger()
 
@@ -107,7 +105,7 @@ def append_accumulated_data(new_df: pd.DataFrame):
         combined = new_df
     # drop rows where any target is NaN
     combined = combined.dropna(subset=TARGET_COLUMNS).reset_index(drop=True)
-    combined.to_csv(ACCUMULATED_DATA_PATH, index=False)
+    save_csv_safely(combined,ACCUMULATED_DATA_PATH,logger=logger)
     logger.logMessage(f"📈 Accumulated dataset now has {len(combined)} rows.")
     return combined
     

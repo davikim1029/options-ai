@@ -5,6 +5,7 @@ from pathlib import Path
 import requests
 from datetime import datetime
 import os
+from utils.utils import save_csv_safely
 from shared_options.log.logger_singleton import getLogger
 
 logger = getLogger()
@@ -168,9 +169,9 @@ def save_csv_for_training(data):
     TRAINING_DIR.mkdir(exist_ok=True)
     file_path = TRAINING_DIR / f"lifetime_training_{timestamp}.csv"
     df = pd.DataFrame(rows)
-    df.to_csv(file_path, index=False)
+    out_path = save_csv_safely(df, file_path, chunksize=25_000, delay=0.2, logger=logger)
     logger.logMessage(f"Training CSV saved to {file_path} ({len(rows)} rows)")
-    return file_path
+    return out_path.name
 
 
 def upload_to_ai_server(csv_path, auto_train=True):
