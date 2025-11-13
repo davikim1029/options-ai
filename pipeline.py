@@ -235,7 +235,8 @@ def upload_to_ai_server(csv_path, auto_train=True):
     url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
     logger.logMessage("Uploading...")
     try:
-        with open(csv_path, "rb") as f:
+        full_path = Path("training") / csv_path
+        with open(full_path, "rb") as f:
             files = {"file": f}
             data = {"auto_train": str(auto_train).lower()}
             resp = requests.post(url, files=files, data=data)
