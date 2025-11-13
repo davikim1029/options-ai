@@ -265,6 +265,6 @@ def run_pipeline():
     if df is None:
         return
     processed_data = transform_for_fusion(df)
-    csv_path = save_csv_for_training(processed_data)
+    csv_path = save_csv_for_training(processed_data,logger=logger,TRAINING_DIR=TRAINING_DIR)
     upload_to_ai_server(csv_path)
     mark_processed(df)
