@@ -148,199 +148,7 @@ def transform_for_fusion(df):
     logger.logMessage(f"Processed {len(processed_rows)} options, skipped {skipped} with no snapshots")
     return processed_rows
 
-
-def save_csv_for_training(data, logger, TRAINING_DIR: Path):
-    """
-    Flatten and save lifetime sequences as CSV for AI upload,
-    streaming incrementally (no huge list in memory).
-    Each chunk is flushed safely to disk, so the system never hangs.
-    """
-    logger.logMessage("Saving CSV")
-
-    cnt = 0
-    total = len(data)
-    throttle_every = 1000   # throttle every N items
-    delay = 0.05            # seconds to sleep per throttle
-    chunk_size = 5000       # write every N rows
-    skipped = 0
-
-    # Prepare directories and file path
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    TRAINING_DIR.mkdir(exist_ok=True)
-    final_path = TRAINING_DIR / f"lifetime_training_{timestamp}.csv"
-
-    # Create a temporary file to ensure atomic writes
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=TRAINING_DIR, newline="") as tmp_file:
-        writer = None
-        batch = []
-
-        for entry in data:
-            cnt += 1
-            try:
-                flat_row = flatten_entry_for_training(entry)
-
-                batch.append(flat_row)
-
-            except Exception as e:
-                skipped += 1
-                logger.logMessage(f"⚠️ Skipped entry {cnt} due to error: {e}")
-                continue
-
-            # Write chunk to disk
-            if len(batch) >= chunk_size:
-                df = pd.DataFrame(batch)
-                if writer is None:
-                    df.to_csv(tmp_file, index=False)
-                    writer = True
-                else:
-                    df.to_csv(tmp_file, index=False, header=False)
-                tmp_file.flush()
-                batch.clear()
-
-            # Logging & throttling
-            if cnt % 100 == 0:
-                logger.logMessage(f"Processed {cnt}/{total} entries ({skipped} skipped)...")
-            if cnt % throttle_every == 0:
-                time.sleep(delay)
-
-        # Write remaining rows
-        if batch:
-            df = pd.DataFrame(batch)
-            if writer is None:
-                df.to_csv(tmp_file, index=False)
-            else:
-                df.to_csv(tmp_file, index=False, header=False)
-            tmp_file.flush()
-
-    # Atomically move temp file into final position
-    Path(tmp_file.name).replace(final_path)
-    logger.logMessage(f"✅ Training CSV saved to {final_path} ({cnt - skipped} rows, {skipped} skipped)")
-
-    return final_path.name
-
-
-def flatten_entry_for_training(entry,
-                               min_expected_gain: float = 0.05,
-                               min_risk_reward: float = 0.2,
-                               late_game_bump_threshold: float = 0.02,
-                               smoothing_window: int = 3):
-    """
-    Flatten an option entry into per-snapshot rows with realistic targets.
-
-    Args:
-        entry: dict containing option lifetime sequence.
-        min_expected_gain: minimum relative gain required to consider a buy signal.
-        min_risk_reward: minimum ratio of potential profit / potential loss to consider a buy.
-        late_game_bump_threshold: ignore small late-game bumps.
-        smoothing_window: number of snapshots to smooth for volatility filtering.
-
-    Returns:
-        List[dict]: flattened rows, one per snapshot
-    """
-    flat_rows = []
-    n = len(entry["sequence"])
-    prices = [step["lastPrice"] for step in entry["sequence"]]
-
-    # Optional smoothing to avoid tiny spikes
-    smoothed_prices = []
-    for i in range(n):
-        window_end = min(i + smoothing_window, n)
-        smoothed_prices.append(max(prices[i:window_end]))
-
-    for i in range(n):
-        entry_price = prices[i]
-        max_profit = -float("inf")
-        hold_days_at_max = 0
-        in_valley = False
-        current_valley_price = entry_price
-        min_future_price = entry_price
-
-        # Peak-after-valley detection
-        for j in range(i+1, n):
-            price = smoothed_prices[j]
-
-            # detect valley
-            if price < current_valley_price:
-                current_valley_price = price
-                in_valley = True
-
-            # detect peak after valley
-            elif in_valley and price > entry_price:
-                profit = (price - entry_price) / entry_price
-                if profit > max_profit:
-                    max_profit = profit
-                    hold_days_at_max = j - i
-
-            # track minimum future price for risk/reward
-            if prices[j] < min_future_price:
-                min_future_price = prices[j]
-
-        # fallback if no peak after valley
-        if max_profit == -float("inf"):
-            future_profits = [(p - entry_price)/entry_price for p in prices[i:]]
-            max_profit = max(future_profits)
-            hold_days_at_max = future_profits.index(max_profit)
-
-        # Cap hold_days to remaining lifetime
-        hold_days_at_max = min(hold_days_at_max, n - i - 1)
-
-        # Apply risk/reward and minimum gain filters
-        potential_loss = entry_price - min_future_price
-        risk_reward_ratio = max_profit / max(potential_loss, 1e-6)  # avoid division by zero
-
-        predicted_return = max_profit
-        predicted_hold_days = hold_days_at_max
-
-        # Clip negative or low-return signals
-        if predicted_return <= 0 or predicted_return < min_expected_gain or risk_reward_ratio < min_risk_reward:
-            predicted_return = 0.0
-            predicted_hold_days = 0
-
-        # Ignore small late-game bumps
-        remaining_days = n - i
-        if remaining_days > 0 and (hold_days_at_max / remaining_days) > 0.8 and predicted_return < late_game_bump_threshold:
-            predicted_return = 0.0
-            predicted_hold_days = 0
-
-        # Flatten features for the snapshot
-        flat_row = {
-            "osiKey": entry["osiKey"],
-            "strikePrice": entry["strikePrice"],
-            "optionType": entry["optionType"],
-            "moneyness": entry["moneyness"],
-            "snapshot_idx": i,
-            "predicted_return": predicted_return,
-            "predicted_hold_days": predicted_hold_days,
-        }
-
-        # Include sequence features
-        for idx, step in enumerate(entry["sequence"]):
-            for k, v in step.items():
-                flat_row[f"{k}_{idx}"] = v
-
-        flat_rows.append(flat_row)
-
-    return flat_rows
-
-
-def upload_to_ai_server(csv_path, auto_train=True):
-    """Upload CSV to AI server for training."""
-    url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
-    logger.logMessage("Uploading...")
-    try:
-        full_path = Path("training") / csv_path
-        with open(full_path, "rb") as f:
-            files = {"file": f}
-            data = {"auto_train": str(auto_train).lower()}
-            resp = requests.post(url, files=files, data=data)
-        resp.raise_for_status()
-        result = resp.json()
-        logger.logMessage(f"Upload result: {result}")
-        return result
-    except requests.exceptions.RequestException as e:
-        logger.logMessage(f"Error uploading training file: {e}")
-        return {"status": "error", "message": str(e)}
-
+ 
 def mark_processed(df):
     logger.logMessage("Marking keys as processed")
     conn = sqlite3.connect(DB_PATH)
@@ -350,15 +158,48 @@ def mark_processed(df):
     conn.commit()
     conn.close()
     logger.logMessage("Marked keys as processed")
+    
+import json
+import requests
+
+def upload_to_ai_server_csv_sequence(data, auto_train=True):
+    """Upload raw option sequences to AI server; server will flatten + compute targets"""
+    url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
+    logger.logMessage("Uploading sequence data to AI server...")
+    try:
+        # FastAPI accepts files as JSON
+        temp_file = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(temp_file, "w") as f:
+            json.dump(data, f)
+
+        with open(temp_file, "rb") as f:
+            files = {"file": f}
+            payload = {"auto_train": str(auto_train).lower()}
+            resp = requests.post(url, files=files, data=payload)
+        resp.raise_for_status()
+        result = resp.json()
+        temp_file.unlink(missing_ok=True)
+        return result
+    except requests.exceptions.RequestException as e:
+        logger.logMessage(f"Upload error: {e}")
+        return {"status": "error", "message": str(e)}
+
 
 # -----------------------------
 # Main Pipeline
 # -----------------------------
 def run_pipeline():
+    # 1. Fetch unprocessed completed options from DB
     df = fetch_new_lifetimes()
     if df is None:
         return
+
+    # 2. Transform into sequence-based structure
     processed_data = transform_for_fusion(df)
-    csv_path = save_csv_for_training(processed_data,logger=logger,TRAINING_DIR=TRAINING_DIR)
-    upload_to_ai_server(csv_path)
+
+    # 3. Upload directly to AI server (CSV flattened internally in server now)
+    result = upload_to_ai_server_csv_sequence(processed_data)
+    logger.logMessage(f"Training server responded: {result}")
+
+    # 4. Mark options as processed in DB
     mark_processed(df)
