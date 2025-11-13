@@ -159,17 +159,34 @@ def train_hybrid_model(df: pd.DataFrame):
 @app.post("/train/upload")
 async def upload_training_data(file: UploadFile = File(...), auto_train: bool = Form(default=False)):
     try:
-        contents = await file.read()
-        df = pd.read_csv(io.BytesIO(contents))
-        df = df.dropna().reset_index(drop=True)
+        # Create a temporary path for large uploads
+        tmp_path = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        with open(tmp_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):  # 1 MB chunks
+                buffer.write(chunk)
+
+        total_rows = 0
+        combined_chunks = []
+        for chunk in pd.read_csv(tmp_path, chunksize=50_000):
+            chunk = chunk.dropna().reset_index(drop=True)
+            combined_chunks.append(chunk)
+            total_rows += len(chunk)
+
+        df = pd.concat(combined_chunks, ignore_index=True)
         accumulated_df = append_accumulated_data(df)
-        result = {"status": "appended", "rows": len(df)}
+        result = {"status": "appended", "rows": total_rows}
+
         if auto_train:
             stats = train_hybrid_model(accumulated_df)
             result.update({"status": "trained", **stats})
+
+        tmp_path.unlink(missing_ok=True)
         return result
+
     except Exception as e:
+        logger.logMessage(f"Upload error: {e}")
         return {"status": "error", "message": str(e)}
+
 
 @app.post("/train")
 def train_accumulated():
