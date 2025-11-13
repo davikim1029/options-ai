@@ -176,19 +176,7 @@ def save_csv_for_training(data, logger, TRAINING_DIR: Path):
         for entry in data:
             cnt += 1
             try:
-                flat_row = {
-                    "osiKey": entry["osiKey"],
-                    "strikePrice": entry["strikePrice"],
-                    "optionType": entry["optionType"],
-                    "moneyness": entry["moneyness"],
-                    "recommendation": entry.get("recommendation", 0),
-                    "expectedHoldDays": entry.get("expectedHoldDays", len(entry["sequence"]))
-                }
-
-                # Flatten sequence
-                for idx, step in enumerate(entry["sequence"]):
-                    for k, v in step.items():
-                        flat_row[f"{k}_{idx}"] = v
+                flat_row = flatten_entry_with_max_return(entry)
 
                 batch.append(flat_row)
 
@@ -228,6 +216,35 @@ def save_csv_for_training(data, logger, TRAINING_DIR: Path):
     logger.logMessage(f"✅ Training CSV saved to {final_path} ({cnt - skipped} rows, {skipped} skipped)")
 
     return final_path.name
+
+def flatten_entry_with_max_return(entry):
+    flat_row = {
+        "osiKey": entry["osiKey"],
+        "strikePrice": entry["strikePrice"],
+        "optionType": entry["optionType"],
+        "moneyness": entry["moneyness"],
+    }
+
+    entry_price = entry["sequence"][0]["lastPrice"]
+    max_profit = -float("inf")
+    hold_days_at_max = 0
+
+    for idx, step in enumerate(entry["sequence"]):
+        # Flatten sequence
+        for k, v in step.items():
+            flat_row[f"{k}_{idx}"] = v
+
+        # Compute max profit
+        profit = (step["lastPrice"] - entry_price) / entry_price
+        if profit > max_profit:
+            max_profit = profit
+            hold_days_at_max = idx
+
+    flat_row["predicted_return"] = max_profit
+    flat_row["predicted_hold_days"] = hold_days_at_max
+
+    return flat_row
+
 
 
 def upload_to_ai_server(csv_path, auto_train=True):
