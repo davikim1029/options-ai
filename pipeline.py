@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 from shared_options.log.logger_singleton import getLogger
 import tempfile
+import numpy as np
 
 logger = getLogger()
 
@@ -176,7 +177,7 @@ def save_csv_for_training(data, logger, TRAINING_DIR: Path):
         for entry in data:
             cnt += 1
             try:
-                flat_row = flatten_entry_with_max_return(entry)
+                flat_row = flatten_entry_for_training(entry)
 
                 batch.append(flat_row)
 
@@ -217,34 +218,109 @@ def save_csv_for_training(data, logger, TRAINING_DIR: Path):
 
     return final_path.name
 
-def flatten_entry_with_max_return(entry):
-    flat_row = {
-        "osiKey": entry["osiKey"],
-        "strikePrice": entry["strikePrice"],
-        "optionType": entry["optionType"],
-        "moneyness": entry["moneyness"],
-    }
 
-    entry_price = entry["sequence"][0]["lastPrice"]
-    max_profit = -float("inf")
-    hold_days_at_max = 0
+def flatten_entry_for_training(entry,
+                               min_expected_gain: float = 0.05,
+                               min_risk_reward: float = 0.2,
+                               late_game_bump_threshold: float = 0.02,
+                               smoothing_window: int = 3):
+    """
+    Flatten an option entry into per-snapshot rows with realistic targets.
 
-    for idx, step in enumerate(entry["sequence"]):
-        # Flatten sequence
-        for k, v in step.items():
-            flat_row[f"{k}_{idx}"] = v
+    Args:
+        entry: dict containing option lifetime sequence.
+        min_expected_gain: minimum relative gain required to consider a buy signal.
+        min_risk_reward: minimum ratio of potential profit / potential loss to consider a buy.
+        late_game_bump_threshold: ignore small late-game bumps.
+        smoothing_window: number of snapshots to smooth for volatility filtering.
 
-        # Compute max profit
-        profit = (step["lastPrice"] - entry_price) / entry_price
-        if profit > max_profit:
-            max_profit = profit
-            hold_days_at_max = idx
+    Returns:
+        List[dict]: flattened rows, one per snapshot
+    """
+    flat_rows = []
+    n = len(entry["sequence"])
+    prices = [step["lastPrice"] for step in entry["sequence"]]
 
-    flat_row["predicted_return"] = max_profit
-    flat_row["predicted_hold_days"] = hold_days_at_max
+    # Optional smoothing to avoid tiny spikes
+    smoothed_prices = []
+    for i in range(n):
+        window_end = min(i + smoothing_window, n)
+        smoothed_prices.append(max(prices[i:window_end]))
 
-    return flat_row
+    for i in range(n):
+        entry_price = prices[i]
+        max_profit = -float("inf")
+        hold_days_at_max = 0
+        in_valley = False
+        current_valley_price = entry_price
+        min_future_price = entry_price
 
+        # Peak-after-valley detection
+        for j in range(i+1, n):
+            price = smoothed_prices[j]
+
+            # detect valley
+            if price < current_valley_price:
+                current_valley_price = price
+                in_valley = True
+
+            # detect peak after valley
+            elif in_valley and price > entry_price:
+                profit = (price - entry_price) / entry_price
+                if profit > max_profit:
+                    max_profit = profit
+                    hold_days_at_max = j - i
+
+            # track minimum future price for risk/reward
+            if prices[j] < min_future_price:
+                min_future_price = prices[j]
+
+        # fallback if no peak after valley
+        if max_profit == -float("inf"):
+            future_profits = [(p - entry_price)/entry_price for p in prices[i:]]
+            max_profit = max(future_profits)
+            hold_days_at_max = future_profits.index(max_profit)
+
+        # Cap hold_days to remaining lifetime
+        hold_days_at_max = min(hold_days_at_max, n - i - 1)
+
+        # Apply risk/reward and minimum gain filters
+        potential_loss = entry_price - min_future_price
+        risk_reward_ratio = max_profit / max(potential_loss, 1e-6)  # avoid division by zero
+
+        predicted_return = max_profit
+        predicted_hold_days = hold_days_at_max
+
+        # Clip negative or low-return signals
+        if predicted_return <= 0 or predicted_return < min_expected_gain or risk_reward_ratio < min_risk_reward:
+            predicted_return = 0.0
+            predicted_hold_days = 0
+
+        # Ignore small late-game bumps
+        remaining_days = n - i
+        if remaining_days > 0 and (hold_days_at_max / remaining_days) > 0.8 and predicted_return < late_game_bump_threshold:
+            predicted_return = 0.0
+            predicted_hold_days = 0
+
+        # Flatten features for the snapshot
+        flat_row = {
+            "osiKey": entry["osiKey"],
+            "strikePrice": entry["strikePrice"],
+            "optionType": entry["optionType"],
+            "moneyness": entry["moneyness"],
+            "snapshot_idx": i,
+            "predicted_return": predicted_return,
+            "predicted_hold_days": predicted_hold_days,
+        }
+
+        # Include sequence features
+        for idx, step in enumerate(entry["sequence"]):
+            for k, v in step.items():
+                flat_row[f"{k}_{idx}"] = v
+
+        flat_rows.append(flat_row)
+
+    return flat_rows
 
 
 def upload_to_ai_server(csv_path, auto_train=True):

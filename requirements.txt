@@ -18,5 +18,4 @@ tqdm
 python-multipart
 requests
 psutil
-
 -e ../options-shared/
