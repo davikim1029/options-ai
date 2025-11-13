@@ -1,5 +1,6 @@
 # pipeline.py
 import sqlite3
+import time
 import pandas as pd
 from pathlib import Path
 import requests
@@ -147,10 +148,16 @@ def transform_for_fusion(df):
     return processed_rows
     
 def save_csv_for_training(data):
-    """Flatten and save lifetime sequences as CSV for AI upload."""
+    """Flatten and save lifetime sequences as CSV for AI upload, with throttled iteration."""
     rows = []
     logger.logMessage("Saving CSV")
+    cnt = 0
+    total = len(data)
+    throttle_every = 1000   # throttle every N items
+    delay = 0.05            # seconds to sleep per throttle
+
     for entry in data:
+        cnt += 1
         flat_row = {
             "osiKey": entry["osiKey"],
             "strikePrice": entry["strikePrice"],
@@ -159,12 +166,21 @@ def save_csv_for_training(data):
             "recommendation": entry.get("recommendation", 0),
             "expectedHoldDays": entry.get("expectedHoldDays", len(entry["sequence"]))
         }
+
         # Flatten sequence data
         for idx, step in enumerate(entry["sequence"]):
             for k, v in step.items():
                 flat_row[f"{k}_{idx}"] = v
+
         rows.append(flat_row)
 
+        # Log progress and throttle slightly
+        if cnt % 100 == 0:
+            logger.logMessage(f"Processed {cnt}/{total} entries...")
+        if cnt % throttle_every == 0:
+            time.sleep(delay)
+
+    # ✅ Keep your existing save logic
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     TRAINING_DIR.mkdir(exist_ok=True)
     file_path = TRAINING_DIR / f"lifetime_training_{timestamp}.csv"
