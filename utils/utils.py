@@ -3,6 +3,9 @@ import pandas as pd
 import time
 from pathlib import Path
 from shared_options.log.logger_singleton import getLogger
+import ast
+import numpy as np
+
 
 def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None):
     """
@@ -21,6 +24,9 @@ def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None)
     logger : optional
         Logger object with .logMessage() method.
     """
+    
+    if logger is None:
+        logger = getLogger()
     # Convert list of dicts to DataFrame if needed
     if isinstance(data, list):
         data = pd.DataFrame(data)
