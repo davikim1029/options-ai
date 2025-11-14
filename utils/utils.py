@@ -48,3 +48,28 @@ def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None)
     if logger:
         logger.logMessage(f"CSV save completed: {output_path}")
     return output_path
+
+
+# -----------------------------
+# Utility helpers
+# -----------------------------
+def to_native_types(obj):
+    """Convert numpy scalars and arrays to native Python types."""
+    if isinstance(obj, dict):
+        return {k: to_native_types(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [to_native_types(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    return obj
+
+def safe_literal_eval(s):
+    """Safely parse python literal from string (used for sequence stored as string)."""
+    try:
+        return ast.literal_eval(s)
+    except Exception:
+        return None

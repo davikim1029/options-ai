@@ -7,8 +7,7 @@ import requests
 from datetime import datetime
 import os
 from shared_options.log.logger_singleton import getLogger
-import tempfile
-import numpy as np
+from utils.utils import to_native_types
 
 logger = getLogger()
 
@@ -170,7 +169,7 @@ def upload_to_ai_server_csv_sequence(data, auto_train=True):
         # FastAPI accepts files as JSON
         temp_file = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(temp_file, "w") as f:
-            json.dump(data, f)
+            json.dump(to_native_types(data), f)
 
         with open(temp_file, "rb") as f:
             files = {"file": f}
