@@ -18,4 +18,5 @@ tqdm
 python-multipart
 requests
 psutil
+ijson
 -e ../options-shared/

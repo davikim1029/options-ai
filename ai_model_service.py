@@ -2,9 +2,7 @@
 import io
 import joblib
 import time
-import tempfile
-import json
-import math
+import ijson  # streaming JSON parser
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -373,103 +371,68 @@ def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_
 @app.post("/train/upload")
 async def upload_training_data(file: UploadFile = File(...), auto_train: bool = Form(default=False)):
     """
-    Accepts:
-     - CSV of flattened rows (with FEATURE_COLUMNS + TARGET_COLUMNS) OR
-     - JSON array of raw entries (each entry has static fields + 'sequence' key)
-    The server detects input type and processes streaming, appending to accumulated CSV.
+    Stream a potentially huge JSON file to disk, process it item-by-item,
+    flatten entries, and append to accumulated CSV. Logging shows progress.
     """
     try:
         TRAINING_DIR.mkdir(exist_ok=True)
-        tmp_path = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        # Write bytes to tmp file; keep extensionless — we'll detect format
+        tmp_path = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        
+        # 1️⃣ Save uploaded file to temp
         with open(tmp_path, "wb") as fw:
             while chunk := await file.read(1024 * 1024):
                 fw.write(chunk)
 
-        # Detect if JSON (starts with '[' or '{') or CSV (other)
-        with open(tmp_path, "rb") as fr:
-            start = fr.read(1024).lstrip()
-        is_json_like = False
-        try:
-            if start.startswith(b"{") or start.startswith(b"["):
-                is_json_like = True
-        except Exception:
-            is_json_like = False
+        total_processed = 0
+        total_skipped = 0
 
-        total_appended = 0
-        if is_json_like:
-            # parse JSON (could be large - but we stream in chunks)
-            with open(tmp_path, "r", encoding="utf-8") as r:
-                data = json.load(r)  # expecting list of entries
-            # Create generator that yields flattened rows
-            def generator():
-                for entry in data:
+        def generator():
+            nonlocal total_processed, total_skipped
+            with open(tmp_path, "rb") as fr:
+                # ijson.items allows streaming JSON arrays without loading all in memory
+                for item in ijson.items(fr, "item"):
                     try:
-                        row = flatten_entry_for_training(entry)
-                        yield row
+                        flat_entry = flatten_entry_for_training(item)
+                        total_processed += 1
+                        if total_processed % 10000 == 0:
+                            logger.logMessage(f"Processed {total_processed} items, skipped {total_skipped}")
+                        yield flat_entry
                     except Exception as e:
-                        logger.logMessage(f"⚠️ Skipping malformed entry during upload: {e}")
-                        continue
-            # write rows to a temporary CSV, then append
-            tmp_csv = TRAINING_DIR / f"_upload_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            written = save_rows_to_csv_stream(generator(), tmp_csv, chunk_size=5000)
-            # append tmp_csv to accumulated file
-            if written:
-                df_chunk = pd.read_csv(tmp_csv)
-                path, cnt = append_accumulated_data_append_only(df_chunk)
-                total_appended += cnt
-                tmp_csv.unlink(missing_ok=True)
-        else:
-            # treat as CSV: process in chunks
-            # we expect either flattened CSV or CSV where one column 'sequence' contains python-literal stringified sequence
-            for chunk in pd.read_csv(tmp_path, chunksize=50_000):
-                # detect if sequence column exists as stringified sequence
-                if "sequence" in chunk.columns:
-                    rows = []
-                    for _, r in chunk.iterrows():
-                        seq_val = r.get("sequence")
-                        seq = None
-                        if isinstance(seq_val, str):
-                            seq = safe_literal_eval(seq_val)
-                        elif isinstance(seq_val, list):
-                            seq = seq_val
-                        else:
-                            seq = []
-                        entry = {
-                            "osiKey": r.get("osiKey"),
-                            "strikePrice": r.get("strikePrice"),
-                            "optionType": r.get("optionType"),
-                            "moneyness": r.get("moneyness"),
-                            "sequence": seq
-                        }
-                        try:
-                            rows.append(flatten_entry_for_training(entry))
-                        except Exception as e:
-                            logger.logMessage(f"⚠️ Skipping row while processing CSV sequences: {e}")
-                    if rows:
-                        df_chunk = pd.DataFrame(rows)
-                        append_accumulated_data_append_only(df_chunk)
-                        total_appended += len(df_chunk)
-                else:
-                    # assume chunk is already flattened with required columns
-                    # ensure types and append
-                    append_accumulated_data_append_only(chunk)
-                    total_appended += len(chunk)
+                        total_skipped += 1
+                        logger.logMessage(f"⚠️ Skipping malformed entry #{total_processed + total_skipped}: {e}")
+
+        # 2️⃣ Save processed entries to CSV
+        tmp_csv = TRAINING_DIR / f"_upload_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        written = save_rows_to_csv_stream(generator(), tmp_csv, chunk_size=5000)
+
+        # 3️⃣ Append to accumulated dataset
+        if written:
+            df_chunk = pd.read_csv(tmp_csv)
+            path, cnt = append_accumulated_data_append_only(df_chunk)
+            total_processed = cnt
+            tmp_csv.unlink(missing_ok=True)
 
         tmp_path.unlink(missing_ok=True)
 
-        result = {"status": "appended", "rows": int(total_appended)}
+        logger.logMessage(f"✅ Upload complete: {total_processed} entries processed, {total_skipped} skipped")
+        
+        result = {"status": "appended", "rows": int(total_processed), "skipped": int(total_skipped)}
 
+        # 4️⃣ Optional: auto_train
         if auto_train:
-            train_result = train_hybrid_model_streamed(ACCUMULATED_DATA_PATH, batch_size=BATCH_SIZE, throttle_delay=0.05, device=DEVICE)
-            # train_result is already jsonable_encoder'd
+            train_result = train_hybrid_model_streamed(
+                ACCUMULATED_DATA_PATH,
+                batch_size=BATCH_SIZE,
+                throttle_delay=0.05,
+                device=DEVICE
+            )
             return train_result
 
-        return jsonable_encoder(result)
+        return result
 
     except Exception as e:
         logger.logMessage(f"Upload error: {e}")
-        return jsonable_encoder({"status": "error", "message": str(e)})
+        return {"status": "error", "message": str(e)}
 
 # -----------------------------
 # Train endpoint (train on accumulated)
@@ -529,3 +492,4 @@ async def predict(data: dict):
     except Exception as e:
         logger.logMessage(f"Predict error: {e}")
         return jsonable_encoder({"status": "error", "message": str(e)})
+
