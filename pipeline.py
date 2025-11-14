@@ -7,7 +7,8 @@ import requests
 from datetime import datetime
 import os
 from shared_options.log.logger_singleton import getLogger
-from utils.utils import to_native_types,write_sequence_streaming
+from ai_model_service import transform_for_fusion_streaming
+from utils.utils import write_sequence_streaming
 
 logger = getLogger()
 
@@ -73,57 +74,7 @@ def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
 
     return df
 
-def transform_for_fusion_streaming(df, logger=None):
-    grouped = df.groupby("osiKey", sort=True)
-    total_groups = len(grouped)
-    cnt = 0
 
-    for osiKey, group in grouped:
-        cnt += 1
-        if logger and cnt % 1000 == 0:
-            logger.logMessage(f"Streaming transform {cnt}/{total_groups}")
-
-        group = group.sort_values("timestamp")
-
-        # Build sequence for this single option
-        sequence = []
-        for _, snap in group.iterrows():
-            sequence.append({
-                "lastPrice": float(snap["lastPrice"]),
-                "bid": float(snap["bid"]),
-                "ask": float(snap["ask"]),
-                "bidSize": int(snap["bidSize"]),
-                "askSize": int(snap["askSize"]),
-                "volume": int(snap["volume"]),
-                "openInterest": int(snap["openInterest"]),
-                "nearPrice": float(snap["nearPrice"]),
-                "inTheMoney": bool(snap["inTheMoney"]),
-                "delta": float(snap["delta"]),
-                "gamma": float(snap["gamma"]),
-                "theta": float(snap["theta"]),
-                "vega": float(snap["vega"]),
-                "rho": float(snap["rho"]),
-                "iv": float(snap["iv"]),
-                "daysToExpiration": int(snap["daysToExpiration"]),
-                "spread": float(snap["spread"]),
-                "midPrice": float(snap["midPrice"]),
-                "moneyness": float(snap["moneyness"])
-            })
-
-        first_price = group.iloc[0]["lastPrice"]
-        last_price = group.iloc[-1]["lastPrice"]
-
-        yield {
-            "osiKey": osiKey,
-            "strikePrice": float(group.iloc[0]["strikePrice"]),
-            "optionType": group.iloc[0]["optionType"],
-            "moneyness": float(group.iloc[0]["moneyness"]),
-            "recommendation": float(last_price - first_price),
-            "expectedHoldDays": len(group),
-            "sequence": sequence,
-        }
-
- 
 def mark_processed(df):
     logger.logMessage("Marking keys as processed")
     conn = sqlite3.connect(DB_PATH)
