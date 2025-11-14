@@ -81,19 +81,24 @@ def safe_literal_eval(s):
     except Exception:
         return None
 
-def write_sequence_streaming(path, data, logger = None):
+def write_sequence_streaming(path, generator, logger=None):
     with open(path, "w") as f:
         f.write("[")
         first = True
-        cnt=0
-        total = len(data)
-        for item in data:
-            cnt +=1 
-            if logger:
-                if cnt % 10000 == 0:
-                    logger.logMessage(f"Processed items {cnt}/{total}")
+        cnt = 0
+
+        for item in generator:
+            cnt += 1
+            if logger and cnt % 1000 == 0:
+                logger.logMessage(f"JSON stream wrote {cnt} items")
+
+            # convert numpy → native types here
+            item = to_native_types(item)
+
             if not first:
                 f.write(",")
+
             json.dump(item, f)
             first = False
+
         f.write("]")

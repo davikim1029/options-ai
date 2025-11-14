@@ -73,79 +73,55 @@ def fetch_new_lifetimes(threshold=MIN_NEW_OPTIONS):
 
     return df
 
-def transform_for_fusion(df):
-    """
-    Transform the lifetime snapshot table into the format expected by the fusion AI model.
-
-    Each option (osiKey) becomes a single row containing:
-      - static features: strikePrice, optionType, moneyness
-      - sequence: ordered snapshots for all relevant features
-      - targets: recommendation, expectedHoldDays
-    """
-    processed_rows = []
-    skipped = 0
-
-    # Group all snapshots by osiKey
+def transform_for_fusion_streaming(df, logger=None):
     grouped = df.groupby("osiKey", sort=True)
     total_groups = len(grouped)
-    logger.logMessage(f"{total_groups} options to process")
-    osi_cnt = 0
+    cnt = 0
+
     for osiKey, group in grouped:
+        cnt += 1
+        if logger and cnt % 1000 == 0:
+            logger.logMessage(f"Streaming transform {cnt}/{total_groups}")
+
         group = group.sort_values("timestamp")
-        osi_cnt += 1
-        
-        # Ensure chronological order
-        if len(group) == 0:
-            skipped += 1
-            continue
-        # Sequence data for all snapshots
-        logger.logMessage(f"Processing option  {osiKey} | {osi_cnt}/{total_groups}")
-        sequence_data = []
+
+        # Build sequence for this single option
+        sequence = []
         for _, snap in group.iterrows():
-            sequence_data.append({
-                "lastPrice": snap["lastPrice"],
-                "bid": snap["bid"],
-                "ask": snap["ask"],
-                "bidSize": snap["bidSize"],
-                "askSize": snap["askSize"],
-                "volume": snap["volume"],
-                "openInterest": snap["openInterest"],
-                "nearPrice": snap["nearPrice"],
-                "inTheMoney": snap["inTheMoney"],
-                "delta": snap["delta"],
-                "gamma": snap["gamma"],
-                "theta": snap["theta"],
-                "vega": snap["vega"],
-                "rho": snap["rho"],
-                "iv": snap["iv"],
-                "daysToExpiration": snap["daysToExpiration"],
-                "spread": snap["spread"],
-                "midPrice": snap["midPrice"],
-                "moneyness": snap["moneyness"]
+            sequence.append({
+                "lastPrice": float(snap["lastPrice"]),
+                "bid": float(snap["bid"]),
+                "ask": float(snap["ask"]),
+                "bidSize": int(snap["bidSize"]),
+                "askSize": int(snap["askSize"]),
+                "volume": int(snap["volume"]),
+                "openInterest": int(snap["openInterest"]),
+                "nearPrice": float(snap["nearPrice"]),
+                "inTheMoney": bool(snap["inTheMoney"]),
+                "delta": float(snap["delta"]),
+                "gamma": float(snap["gamma"]),
+                "theta": float(snap["theta"]),
+                "vega": float(snap["vega"]),
+                "rho": float(snap["rho"]),
+                "iv": float(snap["iv"]),
+                "daysToExpiration": int(snap["daysToExpiration"]),
+                "spread": float(snap["spread"]),
+                "midPrice": float(snap["midPrice"]),
+                "moneyness": float(snap["moneyness"])
             })
 
-        # Targets: we can compute recommendation as total profit/change across the lifetime
         first_price = group.iloc[0]["lastPrice"]
         last_price = group.iloc[-1]["lastPrice"]
-        recommendation = last_price - first_price  # simple placeholder; replace with your formula
 
-        expected_hold_days = len(group)
-
-        # Static features: take first snapshot (or compute averages if preferred)
-        first_snap = group.iloc[0]
-
-        processed_rows.append({
+        yield {
             "osiKey": osiKey,
-            "strikePrice": first_snap["strikePrice"],
-            "optionType": first_snap["optionType"],
-            "moneyness": first_snap["moneyness"],
-            "recommendation": recommendation,
-            "expectedHoldDays": expected_hold_days,
-            "sequence": sequence_data
-        })
-
-    logger.logMessage(f"Processed {len(processed_rows)} options, skipped {skipped} with no snapshots")
-    return processed_rows
+            "strikePrice": float(group.iloc[0]["strikePrice"]),
+            "optionType": group.iloc[0]["optionType"],
+            "moneyness": float(group.iloc[0]["moneyness"]),
+            "recommendation": float(last_price - first_price),
+            "expectedHoldDays": len(group),
+            "sequence": sequence,
+        }
 
  
 def mark_processed(df):
@@ -161,24 +137,28 @@ def mark_processed(df):
 import json
 import requests
 
-def upload_to_ai_server_csv_sequence(data, auto_train=True):
+def upload_to_ai_server_csv_sequence(generator, auto_train=True):
     """Upload raw option sequences to AI server; server will flatten + compute targets"""
     url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
     logger.logMessage("Uploading sequence data to AI server...")
+
     try:
-        # FastAPI accepts files as JSON
         temp_file = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        write_sequence_streaming(temp_file,to_native_types(data),logger=logger)
+
+        # Write JSON streaming directly from generator
+        write_sequence_streaming(temp_file, generator, logger=logger)
 
         with open(temp_file, "rb") as f:
             files = {"file": f}
             payload = {"auto_train": str(auto_train).lower()}
             resp = requests.post(url, files=files, data=payload)
+        
         resp.raise_for_status()
         result = resp.json()
+
         temp_file.unlink(missing_ok=True)
         return result
+
     except requests.exceptions.RequestException as e:
         logger.logMessage(f"Upload error: {e}")
         return {"status": "error", "message": str(e)}
@@ -194,10 +174,10 @@ def run_pipeline():
         return
 
     # 2. Transform into sequence-based structure
-    processed_data = transform_for_fusion(df)
+    stream = transform_for_fusion_streaming(df, logger=logger)
 
     # 3. Upload directly to AI server (CSV flattened internally in server now)
-    result = upload_to_ai_server_csv_sequence(processed_data)
+    result = upload_to_ai_server_csv_sequence(stream)
     logger.logMessage(f"Training server responded: {result}")
 
     # 4. Mark options as processed in DB
