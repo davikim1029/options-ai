@@ -5,6 +5,7 @@ from pathlib import Path
 from shared_options.log.logger_singleton import getLogger
 import ast
 import numpy as np
+import json
 
 
 def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None):
@@ -79,3 +80,20 @@ def safe_literal_eval(s):
         return ast.literal_eval(s)
     except Exception:
         return None
+
+def write_sequence_streaming(path, data, logger = None):
+    with open(path, "w") as f:
+        f.write("[")
+        first = True
+        cnt=0
+        total = len(data)
+        for item in data:
+            cnt +=1 
+            if logger:
+                if cnt % 10000 == 0:
+                    logger.logMessage(f"Processed items {cnt}/{total}")
+            if not first:
+                f.write(",")
+            json.dump(item, f)
+            first = False
+        f.write("]")
