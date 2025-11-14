@@ -302,14 +302,17 @@ def append_accumulated_data_append_only(new_df: pd.DataFrame):
 # -----------------------------
 # Streaming hybrid training (VRAM & CPU safe)
 # -----------------------------
-def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_delay=0.05, device=DEVICE):
+def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_delay=0.0, device=DEVICE):
     """
-    Fully streaming hybrid training:
-     - Incremental SGD via partial_fit
-     - Transformer trained chunk-by-chunk (batches to GPU only)
-     - Throttling between batches to keep server responsive
+    Optimized streaming hybrid training:
+     - Incremental SGD via partial_fit on first snapshot
+     - Transformer trained chunk-by-chunk on sequences
+     - Logs progress at chunk and batch level
+     - Supports large datasets efficiently
     """
-    logger.logMessage("Starting streamed hybrid training...")
+    logger.logMessage("🚀 Starting streamed hybrid training...")
+
+    # 1️⃣ Initialize models
     sgd_model = SGDRegressor(max_iter=1000, tol=1e-3, warm_start=True)
     scaler = StandardScaler()
     transformer_model = OptionTransformer(len(FEATURE_COLUMNS), HIDDEN_DIM, NUM_LAYERS).to(device)
@@ -320,12 +323,13 @@ def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_
     total_rows = 0
     first_chunk = True
 
-    for chunk in pd.read_csv(csv_path, chunksize=50_000):
-        # ensure required columns exist; fill missing with zeros
+    # 2️⃣ Read CSV chunk-by-chunk
+    for chunk_idx, chunk in enumerate(pd.read_csv(csv_path, chunksize=10_000)):
+        
+        # Ensure required columns exist
         for c in FEATURE_COLUMNS + TARGET_COLUMNS:
             if c not in chunk.columns:
                 chunk[c] = 0.0
-
         chunk = chunk.dropna(subset=FEATURE_COLUMNS + TARGET_COLUMNS).reset_index(drop=True)
         if chunk.empty:
             continue
@@ -333,36 +337,51 @@ def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_
         X_chunk = chunk[FEATURE_COLUMNS].values.astype(np.float32)
         y_chunk = chunk[TARGET_COLUMNS].values.astype(np.float32)
 
-        # scaler fit on first chunk, transform subsequently
+        # Incremental scaler + SGD training
         if first_chunk:
             X_scaled = scaler.fit_transform(X_chunk)
             first_chunk = False
         else:
             X_scaled = scaler.transform(X_chunk)
-
-        # SGD incremental update on returns (target 0)
         sgd_model.partial_fit(X_scaled, y_chunk[:, 0])
 
-        # Transformer training chunk-by-chunk
+        # -----------------------------
+        # Transformer training
+        # -----------------------------
         dataset = OptionLifetimeDataset(chunk)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-        for X_batch, y_batch in dataloader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        for batch_idx, (X_batch, y_batch) in enumerate(dataloader):
+            
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+
             optimizer.zero_grad()
             pred_return, pred_hold = transformer_model(X_batch)
-            loss = criterion(pred_return, y_batch[:,0].unsqueeze(1)) + criterion(pred_hold, y_batch[:,1].unsqueeze(1))
+            
+            # Ensure shapes match for loss
+            loss = criterion(pred_return, y_batch[:,0]) + criterion(pred_hold, y_batch[:,1])
             loss.backward()
             optimizer.step()
+
+            # Optional throttling
             if throttle_delay > 0:
                 time.sleep(throttle_delay)
 
-        total_rows += len(chunk)
+            # Batch-level logging
+            if batch_idx % 10 == 0:
+                logger.logMessage(
+                    f"Chunk {chunk_idx} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item():.6f}"
+                )
 
-    # Save model & scaler
+        total_rows += len(chunk)
+        logger.logMessage(f"✅ Finished chunk {chunk_idx} | Total rows processed: {total_rows}")
+
+    # 3️⃣ Save hybrid model
     hybrid_model = {"sgd": sgd_model, "transformer": transformer_model}
     save_model(hybrid_model, scaler)
-    logger.logMessage(f"📊 Streamed hybrid training complete: {total_rows} rows processed")
+    logger.logMessage(f"🎯 Streamed hybrid training complete: {total_rows} rows processed")
+
     return jsonable_encoder({"status": "trained", "rows": int(total_rows)})
 
 # -----------------------------
