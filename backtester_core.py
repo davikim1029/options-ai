@@ -3,9 +3,13 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import json
+import os
 from evaluation import load_model_and_scaler
 from ast import literal_eval
-from threading import Lock
+from threading import Lock, get_ident
+from shared_options.log.logger_singleton import getLogger
+from fastapi import Request
+import traceback
 
 # -----------------------------
 # Config / Status
@@ -29,16 +33,28 @@ def finalize_backtest_status(results: dict):
 # -----------------------------
 # Core Streaming Backtest
 # -----------------------------
-def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: int = None) -> dict:
+def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: int = None, fastapi_request: Request = None) -> dict:
     """
     Perform memory-conscious backtest on large CSV.
     Computes: total_options, buys, win_rate, avg_trade_return, total_profit.
     """
-    if not _backtest_lock.acquire(blocking=False):
+    logger = getLogger()
+    pid = os.getpid()
+    tid = get_ident()
+    req_id = getattr(fastapi_request.state, "request_id", "no-request") if fastapi_request else "no-request"
+
+    logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Entered Run_Backtest Streaming")
+
+    acquired = _backtest_lock.acquire(blocking=False)
+    if not acquired:
+        logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Failed to acquire Lock")
         return {"error": "Another backtest is already running."}
 
     try:
+        logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Starting Backtest Streaming")
         begin_backtest_status()
+        logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Backtest Status set")
+
         model, scaler = load_model_and_scaler()
 
         total_options = 0
@@ -46,14 +62,19 @@ def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: in
         wins = 0
         pnl_total = 0
 
-        # Attempt to estimate total rows if not given
+        # Estimate total rows if not given
         if total_rows is None:
             try:
                 total_rows = sum(1 for _ in pd.read_csv(csv_path, usecols=[0], chunksize=100_000))
             except Exception:
                 total_rows = None  # fallback
 
+        chunkCount = 0
         for chunk in pd.read_csv(csv_path, chunksize=batch_size):
+            chunkCount += 1
+            if chunkCount % 50 == 0:
+                logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Processed {chunkCount} chunks")
+
             required_cols = {"osiKey", "seq_features", "final_profit"}
             missing = required_cols - set(chunk.columns)
             if missing:
@@ -61,8 +82,12 @@ def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: in
                 return {"error": f"Missing columns: {missing}"}
 
             # Vectorized parsing of seq_features
-            seq_arrays = chunk["seq_features"].apply(lambda x: np.array(literal_eval(x), dtype=float))
-            
+            try:
+                seq_arrays = chunk["seq_features"].apply(lambda x: np.array(literal_eval(x), dtype=float))
+            except Exception as e:
+                logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Error parsing seq_features: {e}\n{traceback.format_exc()}")
+                return {"error": f"Error parsing seq_features: {e}"}
+
             for idx, seq_array in enumerate(seq_arrays):
                 total_options += 1
                 seq_scaled = scaler.transform(seq_array.reshape(1, -1))
@@ -92,5 +117,12 @@ def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: in
 
         finalize_backtest_status(results)
         return results
+
+    except Exception as e:
+        logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Exception during backend streaming: {e}\n{traceback.format_exc()}")
+        return {"error": str(e)}
+
     finally:
-        _backtest_lock.release()
+        if acquired and _backtest_lock.locked():
+            _backtest_lock.release()
+            logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Released backtest lock")

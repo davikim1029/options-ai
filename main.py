@@ -12,6 +12,7 @@ import numpy as np
 from datetime import datetime
 import psutil
 import shutil
+import json
 from logger.logger_singleton import getLogger
 from logging import FileHandler
 from pipeline import run_pipeline
@@ -38,7 +39,7 @@ UVICORN_CMD = [
     MODEL_SERVER_SCRIPT,
     "--host", "0.0.0.0",
     f"--port={UVICORN_PORT}",
-    "--log-level", "info"
+    "--no-access-log"
 ]
 
 # -----------------------------
@@ -334,7 +335,7 @@ def start_backtest_cli():
 
         state = status_data.get("status", "idle")
         progress = status_data.get("progress", 0)
-        print(f"\r[{state}] Progress: {progress}%", end="", flush=True)
+        print(f"\r[{state}] Progress: {progress}%", end="")
 
         if state == "complete":
             print("\n✅ Backtest complete!")

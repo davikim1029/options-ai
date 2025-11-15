@@ -5,6 +5,7 @@ import time
 import json
 import math
 import ast
+import os
 import sqlite3
 import ijson  # streaming JSON parser
 import pandas as pd
@@ -27,9 +28,22 @@ from backtester_core import BACKTEST_STATUS_PATH, run_backtest_streaming
 from fastapi import APIRouter
 from backtester_api import router as backtest_router
 
+import uuid
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        request.state.request_id = str(uuid.uuid4())
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        return response
+
+
 logger = getLogger()
 app = FastAPI(title="Hybrid AI Model Service (Seq Transformer)")
 app.include_router(backtest_router)
+app.add_middleware(RequestIDMiddleware)
+
 
 # -----------------------------
 # Paths & Constants
@@ -333,7 +347,7 @@ def append_accumulated_data_append_only(new_df: pd.DataFrame):
 # Upload endpoint (streaming + ijson)
 # -----------------------------
 @app.post("/train/upload")
-async def upload_training_data(file: UploadFile = File(...), auto_train: bool = Form(default=False)):
+async def upload_training_data(file: UploadFile = File(...), auto_train: bool = Form(default=True)):
     """
     Stream a potentially huge JSON file to disk, stream-parse with ijson,
     group into sequences, compute targets, and append to accumulated CSV in chunks.
