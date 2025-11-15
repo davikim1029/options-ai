@@ -239,7 +239,10 @@ def main():
         print("8) Run test prediction")
         print("9) Run Pipeline")
         print("10) Populate Lifetime data with all snapshots")
-        print("11) Exit")
+        print("11) Run Backtest full")
+        print("12) Run Backtest")
+        print("13) Get Backtest Status")
+        print("14) Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
@@ -268,18 +271,16 @@ def main():
         elif choice == "10":
             copy_all_snapshot_data()
         elif choice == "11":
+            start_backtest_cli()
             break
         elif choice == "12":
-            start_backtest_cli()
-
-        elif choice == "13":
             url = f"http://127.0.0.1:{UVICORN_PORT}/backtest/run"
             print(requests.post(url).json())
-
-        elif choice == "14":
+        elif choice == "13":
             url = f"http://127.0.0.1:{UVICORN_PORT}/backtest/status"
             print(requests.get(url).json())
-
+        elif choice == "14":
+            break
         else:
             print("Invalid choice, try again.")
 
