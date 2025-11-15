@@ -21,7 +21,10 @@ from torch.utils.data import Dataset, DataLoader
 from logger.logger_singleton import getLogger
 from utils.utils import safe_literal_eval, to_native_types
 from pydantic import BaseModel
-import tempfile
+from fastapi import APIRouter, UploadFile, File
+from evaluation import evaluate_model
+from backtester import backtest, BACKTEST_STATUS_PATH
+from dataloader import load_lifetime_dataset,load_accumulated_training_csvs
 
 logger = getLogger()
 app = FastAPI(title="Hybrid AI Model Service (Seq Transformer)")
@@ -883,17 +886,6 @@ class BacktestParams(BaseModel):
     entry_threshold: float = 0.05
     capital_per_trade: float = 1000.0
 
-@app.get("/evaluate")
-def evaluate_endpoint(batch_size: int = 128):
-    try:
-        if not ACCUMULATED_DATA_PATH.exists():
-            return jsonable_encoder(to_native_types({"status": "error", "message": "No accumulated data found."}))
-        metrics = evaluate_on_csv(ACCUMULATED_DATA_PATH, batch_size=batch_size)
-        return jsonable_encoder(to_native_types(metrics))
-    except Exception as e:
-        logger.logMessage(f"Evaluate error: {e}")
-        return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
-
 @app.get("/confusion")
 def confusion_endpoint():
     try:
@@ -927,3 +919,30 @@ async def predict_one(feature: dict = Body(...)):
     except Exception as e:
         logger.logMessage(f"Predict_one error: {e}")
         return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
+
+
+logger = getLogger()
+router = APIRouter()
+
+@router.get("/evaluate")
+def evaluate_endpoint(batch_size: int = 128):
+    try:
+        df = load_accumulated_training_csvs(chunk_size=batch_size)
+        metrics = evaluate_model(df, batch_size=batch_size)
+        return {"status": "success", "metrics": metrics}
+    except Exception as e:
+        logger.logMessage(f"Evaluate error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/backtest/run")
+def api_backtest():
+    df = load_lifetime_dataset()  # you already have this
+    results = backtest(df)
+    return results
+
+@router.get("/backtest/status")
+def api_backtest_status():
+    if BACKTEST_STATUS_PATH.exists():
+        return json.loads(BACKTEST_STATUS_PATH.read_text())
+    return {"status": "none"}
