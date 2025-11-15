@@ -23,8 +23,9 @@ from utils.utils import safe_literal_eval, to_native_types
 from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File
 from evaluation import evaluate_model
-from backtester import backtest, BACKTEST_STATUS_PATH
+from backtester import BACKTEST_STATUS_PATH, run_backtest_streaming
 from dataloader import load_lifetime_dataset,load_accumulated_training_csvs
+from fastapi import APIRouter
 
 logger = getLogger()
 app = FastAPI(title="Hybrid AI Model Service (Seq Transformer)")
@@ -934,12 +935,23 @@ def evaluate_endpoint(batch_size: int = 128):
         logger.logMessage(f"Evaluate error: {e}")
         return {"status": "error", "message": str(e)}
 
+router = APIRouter()
+
+ACCUMULATED_DATA_PATH = Path("training/accumulated_training.csv")
 
 @router.post("/backtest/run")
-def api_backtest():
-    df = load_lifetime_dataset()  # you already have this
-    results = backtest(df)
-    return results
+def api_backtest(batch_size: int = 256):
+    """
+    Launch a streaming, low-memory backtest.
+    Returns immediately with basic info; progress stored in backtest_status.json.
+    """
+    if not ACCUMULATED_DATA_PATH.exists():
+        return {"status": "error", "message": "No accumulated training dataset found."}
+
+    # Kick off the backtest synchronously for now
+    results = run_backtest_streaming(ACCUMULATED_DATA_PATH, batch_size=batch_size)
+    return {"status": "complete", "results": results}
+
 
 @router.get("/backtest/status")
 def api_backtest_status():
