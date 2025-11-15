@@ -23,12 +23,13 @@ from utils.utils import safe_literal_eval, to_native_types
 from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File
 from evaluation import evaluate_model
-from backtester import BACKTEST_STATUS_PATH, run_backtest_streaming
-from dataloader import load_lifetime_dataset,load_accumulated_training_csvs
+from backtester_core import BACKTEST_STATUS_PATH, run_backtest_streaming
 from fastapi import APIRouter
+from backtester_api import router as backtest_router
 
 logger = getLogger()
 app = FastAPI(title="Hybrid AI Model Service (Seq Transformer)")
+app.include_router(backtest_router)
 
 # -----------------------------
 # Paths & Constants
@@ -883,9 +884,6 @@ def backtest_on_csv(csv_path: Path, entry_threshold: float = 0.05, capital_per_t
 # -----------------------------
 # Endpoints for evaluate/confusion/backtest/predict_one
 # -----------------------------
-class BacktestParams(BaseModel):
-    entry_threshold: float = 0.05
-    capital_per_trade: float = 1000.0
 
 @app.get("/confusion")
 def confusion_endpoint():
@@ -896,17 +894,6 @@ def confusion_endpoint():
         return jsonable_encoder(to_native_types(metrics.get("confusion", {})))
     except Exception as e:
         logger.logMessage(f"Confusion error: {e}")
-        return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
-
-@app.post("/backtest")
-def backtest_endpoint(params: BacktestParams):
-    try:
-        if not ACCUMULATED_DATA_PATH.exists():
-            return jsonable_encoder(to_native_types({"status": "error", "message": "No accumulated data found."}))
-        res = backtest_on_csv(ACCUMULATED_DATA_PATH, entry_threshold=params.entry_threshold, capital_per_trade=params.capital_per_trade)
-        return jsonable_encoder(to_native_types(res))
-    except Exception as e:
-        logger.logMessage(f"Backtest error: {e}")
         return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
 
 @app.post("/predict_one")
@@ -922,10 +909,7 @@ async def predict_one(feature: dict = Body(...)):
         return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
 
 
-logger = getLogger()
-router = APIRouter()
-
-@router.get("/evaluate")
+@app.get("/evaluate")
 def evaluate_endpoint(batch_size: int = 128):
     try:
         df = load_accumulated_training_csvs(chunk_size=batch_size)
@@ -935,26 +919,20 @@ def evaluate_endpoint(batch_size: int = 128):
         logger.logMessage(f"Evaluate error: {e}")
         return {"status": "error", "message": str(e)}
 
-router = APIRouter()
+# -----------------------------
+# Load all accumulated CSVs in training dir
+# -----------------------------
+def load_accumulated_training_csvs(chunk_size=25_000):
+    """Load all CSVs from TRAINING_DIR in RAM-safe chunks."""
+    all_files = sorted(Path(TRAINING_DIR).glob("*.csv"))
+    if not all_files:
+        raise RuntimeError(f"No training CSVs found in {TRAINING_DIR}")
 
-ACCUMULATED_DATA_PATH = Path("training/accumulated_training.csv")
+    # Concatenate all CSVs into one DataFrame safely
+    dfs = []
+    for f in all_files:
+        for chunk in pd.read_csv(f, chunksize=chunk_size):
+            dfs.append(chunk)
 
-@router.post("/backtest/run")
-def api_backtest(batch_size: int = 256):
-    """
-    Launch a streaming, low-memory backtest.
-    Returns immediately with basic info; progress stored in backtest_status.json.
-    """
-    if not ACCUMULATED_DATA_PATH.exists():
-        return {"status": "error", "message": "No accumulated training dataset found."}
-
-    # Kick off the backtest synchronously for now
-    results = run_backtest_streaming(ACCUMULATED_DATA_PATH, batch_size=batch_size)
-    return {"status": "complete", "results": results}
-
-
-@router.get("/backtest/status")
-def api_backtest_status():
-    if BACKTEST_STATUS_PATH.exists():
-        return json.loads(BACKTEST_STATUS_PATH.read_text())
-    return {"status": "none"}
+    df = pd.concat(dfs, ignore_index=True)
+    return df

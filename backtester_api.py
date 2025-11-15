@@ -1,15 +1,11 @@
-# ai_model_service/backtest_api.py
+# backtester_api.py
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 from pathlib import Path
 import json
-from threading import Lock
-from backtester import run_backtest_streaming, BACKTEST_STATUS_PATH
+from backtester_core import run_backtest_streaming, BACKTEST_STATUS_PATH, _backtest_lock
 
-router = APIRouter(prefix="/backtest", tags=["Backtest"])
-
-# Thread-safety lock to prevent multiple backtests at once
-_backtest_lock = Lock()
+router = APIRouter(prefix="/backtest", tags=["backtest"])
 
 class BacktestRequest(BaseModel):
     csv_path: str = "training/accumulated_training.csv"
@@ -17,18 +13,13 @@ class BacktestRequest(BaseModel):
 
 @router.post("/start")
 def start_backtest(request: BacktestRequest, background_tasks: BackgroundTasks):
-    """
-    Start a new backtest in the background.
-    """
+    csv_file = Path(request.csv_path)
+    if not csv_file.exists():
+        return {"status": "error", "message": f"CSV file not found: {csv_file}"}
+
     if not _backtest_lock.acquire(blocking=False):
         return {"status": "error", "message": "A backtest is already running."}
 
-    csv_file = Path(request.csv_path)
-    if not csv_file.exists():
-        _backtest_lock.release()
-        return {"status": "error", "message": f"CSV file not found: {csv_file}"}
-
-    # Run backtest in background
     def _run():
         try:
             run_backtest_streaming(csv_file, batch_size=request.batch_size)
@@ -40,16 +31,13 @@ def start_backtest(request: BacktestRequest, background_tasks: BackgroundTasks):
 
 @router.get("/status")
 def get_backtest_status():
-    """
-    Get current backtest progress and results.
-    """
     if not BACKTEST_STATUS_PATH.exists():
         return {"status": "idle", "progress": 0, "results": None}
     
-    with BACKTEST_STATUS_PATH.open("r") as f:
-        try:
+    try:
+        with BACKTEST_STATUS_PATH.open("r") as f:
             data = json.load(f)
-        except json.JSONDecodeError:
-            data = {"status": "error", "progress": 0, "results": None}
+    except json.JSONDecodeError:
+        data = {"status": "error", "progress": 0, "results": None}
     
     return data

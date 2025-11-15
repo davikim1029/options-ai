@@ -288,50 +288,65 @@ def main():
 # -----------------------------
 # Backtest CLI Integration
 # -----------------------------
+
 def start_backtest_cli():
-    from fastapi import status
-    import requests
-    import json
+    BACKTEST_START_URL = f"http://127.0.0.1:{UVICORN_PORT}/backtest/start"
+    BACKTEST_STATUS_URL = f"http://127.0.0.1:{UVICORN_PORT}/backtest/status"
+    """
+    Starts a backtest on the AI server in the background and polls for status.
+    """
+    TRAINING_DIR = Path("training")
+    default_csv = TRAINING_DIR / "accumulated_training.csv"
 
-    url_start = f"http://127.0.0.1:{UVICORN_PORT}/backtest/start"
-    url_status = f"http://127.0.0.1:{UVICORN_PORT}/backtest/status"
-
-    csv_path = input("Enter path to CSV file (default: training/accumulated_training.csv): ").strip()
+    csv_path = input(f"Enter path to CSV file (default: {default_csv}): ").strip()
     if not csv_path:
-        csv_path = str(TRAINING_DIR / "accumulated_training.csv")
+        csv_path = str(default_csv)
 
+    batch_size_input = input("Enter batch size (default 128): ").strip()
+    batch_size = int(batch_size_input) if batch_size_input else 128
+
+    # Start the backtest
     try:
-        resp = requests.post(url_start, json={"csv_path": csv_path, "batch_size": 128})
+        resp = requests.post(BACKTEST_START_URL, json={"csv_path": csv_path, "batch_size": batch_size})
         data = resp.json()
-        if data.get("status") != "started":
-            logger.logMessage(f"Could not start backtest: {data.get('message')}")
-            return
-        logger.logMessage("Backtest started in background. Polling status...")
-
-        # Poll status every 2 seconds until complete
-        import time
-        while True:
-            resp_status = requests.get(url_status)
-            status_data = resp_status.json()
-            progress = status_data.get("progress", 0)
-            state = status_data.get("status", "idle")
-            print(f"\r[{state}] Progress: {progress}%", end="", flush=True)
-
-            if state == "complete":
-                print("\n✅ Backtest complete!")
-                results = status_data.get("results", {})
-                print(json.dumps(results, indent=2))
-                logger.logMessage(f"Backtest results: {results}")
-                break
-            elif state == "error":
-                print(f"\n❌ Backtest error: {status_data.get('results')}")
-                break
-
-            time.sleep(2)
-
     except requests.exceptions.RequestException as e:
         logger.logMessage(f"Error communicating with AI server: {e}")
+        print(f"❌ Could not reach server: {e}")
+        return
 
+    if data.get("status") != "started":
+        msg = data.get("message", "Unknown error")
+        logger.logMessage(f"Could not start backtest: {msg}")
+        print(f"❌ Could not start backtest: {msg}")
+        return
+
+    print("✅ Backtest started in background. Polling status...")
+
+    # Poll status every 2 seconds until complete
+    while True:
+        try:
+            resp_status = requests.get(BACKTEST_STATUS_URL)
+            status_data = resp_status.json()
+        except requests.exceptions.RequestException as e:
+            logger.logMessage(f"Error fetching backtest status: {e}")
+            print(f"\n❌ Error fetching status: {e}")
+            break
+
+        state = status_data.get("status", "idle")
+        progress = status_data.get("progress", 0)
+        print(f"\r[{state}] Progress: {progress}%", end="", flush=True)
+
+        if state == "complete":
+            print("\n✅ Backtest complete!")
+            results = status_data.get("results", {})
+            print(json.dumps(results, indent=2))
+            logger.logMessage(f"Backtest results: {results}")
+            break
+        elif state == "error":
+            print(f"\n❌ Backtest error: {status_data.get('results')}")
+            break
+
+        time.sleep(2)
 
 
 if __name__ == "__main__":
