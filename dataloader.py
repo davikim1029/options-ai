@@ -1,4 +1,4 @@
-from pipeline import DB_PATH, TRAINING_DIR, fetch_new_lifetimes
+from pipeline import DB_PATH, TRAINING_DIR
 import pandas as pd
 from pathlib import Path
 import glob
