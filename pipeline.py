@@ -93,7 +93,7 @@ def upload_to_ai_server_csv_sequence(generator, auto_train=True):
     logger.logMessage("Uploading sequence data to AI server...")
 
     try:
-        temp_file = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        temp_file = TRAINING_DIR / f"_upload_tmp_training.json"
 
         # Write JSON streaming directly from generator
         write_sequence_streaming(temp_file, generator, logger=logger)

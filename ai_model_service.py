@@ -354,7 +354,7 @@ async def upload_training_data(file: UploadFile = File(...), auto_train: bool = 
     """
     try:
         ensure_training_dir()
-        tmp_upload = TRAINING_DIR / f"_upload_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        tmp_upload = TRAINING_DIR / f"_upload_tmp_training.json"
         # 1) Save upload to disk (streamed)
         with open(tmp_upload, "wb") as fw:
             while chunk := await file.read(1024 * 1024):
@@ -433,9 +433,9 @@ async def upload_training_data(file: UploadFile = File(...), auto_train: bool = 
                             skipped += 1
                             logger.logMessage(f"⚠️ Skipping malformed per-option upload item: {e}")
                             continue
-                written = save_rows_to_csv_stream(gen_per_option(), TRAINING_DIR / f"_upload_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", chunk_size=5000)
+                written = save_rows_to_csv_stream(gen_per_option(), TRAINING_DIR / f"_upload_processed_training.csv", chunk_size=5000)
                 if written:
-                    df_chunk = pd.read_csv(TRAINING_DIR / f"_upload_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                    df_chunk = pd.read_csv(TRAINING_DIR / f"_upload_processed_training.csv")
                     append_accumulated_data_append_only(df_chunk)
                     # cleanup handled by save_rows_to_csv_stream
             else:
@@ -532,9 +532,9 @@ async def upload_training_data(file: UploadFile = File(...), auto_train: bool = 
                             logger.logMessage(f"Grouped and processed {processed} osiKeys from temp DB")
                         yield row
                 # stream to CSV
-                written = save_rows_to_csv_stream(grouped_generator(), TRAINING_DIR / f"_upload_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", chunk_size=5000)
+                written = save_rows_to_csv_stream(grouped_generator(), TRAINING_DIR / f"_upload_processed_training.csv", chunk_size=5000)
                 if written:
-                    df_chunk = pd.read_csv(TRAINING_DIR / f"_upload_processed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                    df_chunk = pd.read_csv(TRAINING_DIR / f"_upload_processed_training.csv")
                     append_accumulated_data_append_only(df_chunk)
                 conn.close()
                 tmp_sqlite.unlink(missing_ok=True)
