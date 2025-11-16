@@ -242,29 +242,114 @@ def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_
     first_chunk = True
 
     for chunk_idx, chunk in enumerate(pd.read_csv(csv_path, chunksize=10_000)):
-        # ensure required columns
+
+        # ------------------------------
+        # 1. Ensure required columns exist
+        # ------------------------------
         for c in FEATURE_COLUMNS + TARGET_COLUMNS + ["sequence"]:
             if c not in chunk.columns:
-                chunk[c] = 0.0 if c in TARGET_COLUMNS else ""
+                # All FEATURE/TARGET values must be numeric → fill with 0.0
+                chunk[c] = 0.0 if c in FEATURE_COLUMNS + TARGET_COLUMNS else "[]"
+
+        # ------------------------------
+        # 2. Clean up bad / empty values
+        # ------------------------------
+        # Convert known "bad" text values to NaN
+        chunk.replace(
+            {
+                "": np.nan,
+                " ": np.nan,
+                "  ": np.nan,
+                "nan": np.nan,
+                "None": np.nan,
+                None: np.nan,
+            },
+            inplace=True,
+        )
+
+        # Drop any rows that are missing required numeric data
         chunk = chunk.dropna(subset=FEATURE_COLUMNS + TARGET_COLUMNS).reset_index(drop=True)
         if chunk.empty:
             continue
 
-        # SGD training on first-snapshot features (we already saved first snapshot's features in top-level columns)
-        X_first = chunk[FEATURE_COLUMNS].values.astype(np.float32)
-        y_first = chunk[TARGET_COLUMNS].values.astype(np.float32)
+        # ------------------------------
+        # 3. Convert numeric columns safely
+        # ------------------------------
+        try:
+            chunk[FEATURE_COLUMNS] = chunk[FEATURE_COLUMNS].astype(np.float32)
+            chunk[TARGET_COLUMNS] = chunk[TARGET_COLUMNS].astype(np.float32)
+        except Exception as e:
+            # Debug print: find exactly which column/row is bad
+            bad_rows = chunk[
+                chunk[FEATURE_COLUMNS + TARGET_COLUMNS].applymap(
+                    lambda x: isinstance(x, str)
+                ).any(axis=1)
+            ]
+            logger.logMessage(f"❌ Numeric conversion failed on rows:\n{bad_rows.head()}")
+            raise e
+
+        # ------------------------------
+        # 4. Normalize sequence column
+        # ------------------------------
+        cleaned_sequences = []
+        for seq_raw in chunk["sequence"].values:
+            if isinstance(seq_raw, list):
+                cleaned_sequences.append(seq_raw)
+                continue
+
+            if isinstance(seq_raw, str):
+                seq_raw = seq_raw.strip()
+
+                # Convert "" to empty list
+                if seq_raw == "":
+                    cleaned_sequences.append([])
+                    continue
+
+                # Try literal_eval first
+                try:
+                    seq_list = safe_literal_eval(seq_raw)
+                    if isinstance(seq_list, list):
+                        cleaned_sequences.append(seq_list)
+                        continue
+                except Exception:
+                    pass
+
+                # Try JSON
+                try:
+                    seq_list = json.loads(seq_raw)
+                    if isinstance(seq_list, list):
+                        cleaned_sequences.append(seq_list)
+                        continue
+                except Exception:
+                    pass
+
+            # Fallback
+            cleaned_sequences.append([])
+
+        chunk["sequence"] = cleaned_sequences
+
+        # ------------------------------
+        # 5. First-snapshot SGD training
+        # ------------------------------
+        X_first = chunk[FEATURE_COLUMNS].values
+        y_first = chunk[TARGET_COLUMNS].values[:, 0]
+
         if first_chunk:
             X_scaled = scaler.fit_transform(X_first)
             first_chunk = False
         else:
             X_scaled = scaler.transform(X_first)
-        sgd_model.partial_fit(X_scaled, y_first[:, 0])
 
-        # Transformer training: build SequenceDataset for this chunk
+        sgd_model.partial_fit(X_scaled, y_first)
+
+        # ------------------------------
+        # 6. Transformer sequence training
+        # ------------------------------
         seq_ds = SequenceDataset(chunk, max_seq_len)
         if len(seq_ds) == 0:
             total_rows += len(chunk)
             continue
+
         dataloader = DataLoader(seq_ds, batch_size=batch_size, shuffle=True)
 
         for batch_idx, (X_batch, y_batch) in enumerate(dataloader):
@@ -273,18 +358,23 @@ def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_
 
             optimizer.zero_grad()
             pred_return, pred_hold = transformer_model(X_batch)
-            # pred_return, pred_hold shapes are [B], y_batch columns are [B]
-            loss = criterion(pred_return, y_batch[:, 0]) + criterion(pred_hold, y_batch[:, 1])
+            loss = (
+                criterion(pred_return, y_batch[:, 0])
+                + criterion(pred_hold, y_batch[:, 1])
+            )
             loss.backward()
             optimizer.step()
+
             if throttle_delay > 0:
                 time.sleep(throttle_delay)
 
             if batch_idx % 10 == 0:
-                logger.logMessage(f"Chunk {chunk_idx} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item():.6f}")
+                logger.logMessage(
+                    f"Chunk {chunk_idx} | Batch {batch_idx}/{len(dataloader)} | Loss: {loss.item():.6f}"
+                )
 
-        total_rows += len(chunk)
-        logger.logMessage(f"✅ Finished chunk {chunk_idx} | Total rows processed: {total_rows}")
+    total_rows += len(chunk)
+    logger.logMessage(f"✅ Finished chunk {chunk_idx} | Total rows processed: {total_rows}")
 
     # Save model & scaler
     hybrid_model = {"sgd": sgd_model, "transformer": transformer_model}
