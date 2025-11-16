@@ -22,7 +22,6 @@ from utils.utils import safe_literal_eval, to_native_types
 from pydantic import BaseModel
 from evaluation import evaluate_model
 from backtester_api import router as backtest_router
-from shared_options.services.utils import to_native_types, safe_literal_eval
 from pathlib import Path
 from fastapi.encoders import jsonable_encoder
 from starlette.middleware.base import BaseHTTPMiddleware
