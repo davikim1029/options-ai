@@ -61,19 +61,29 @@ def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None)
 # Utility helpers
 # -----------------------------
 from decimal import Decimal
+
 def to_native_types(obj):
-    """Convert numpy scalars, arrays, and Decimals to native Python types."""
+    """Convert numpy scalars, arrays, Decimals, and tuples to JSON-serializable types."""
     if isinstance(obj, dict):
         return {k: to_native_types(v) for k, v in obj.items()}
+
     if isinstance(obj, list):
         return [to_native_types(v) for v in obj]
+
+    if isinstance(obj, tuple):
+        return [to_native_types(v) for v in obj]
+
     if isinstance(obj, (np.integer,)):
         return int(obj)
+
     if isinstance(obj, (np.floating, Decimal)):
         return float(obj)
+
     if isinstance(obj, (np.ndarray,)):
         return obj.tolist()
+
     return obj
+
 
 
 def safe_literal_eval(s):
