@@ -13,7 +13,7 @@ import pandas as pd
 import requests
 from datetime import datetime
 from shared_options.log.logger_singleton import getLogger
-from ai_model_service import transform_for_fusion_streaming
+from training import transform_for_fusion_streaming
 from utils.utils import write_sequence_streaming
 
 logger = getLogger()
