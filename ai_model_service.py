@@ -1,18 +1,16 @@
 # ai_server.py  (FULL production-ready rewrite - drop-in replacement)
-import io
 import joblib
+import uuid
 import time
 import json
 import math
-import ast
-import os
 import sqlite3
-import ijson  # streaming JSON parser
+import ijson
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Form, Body,APIRouter,WebSocket
 from fastapi.encoders import jsonable_encoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import SGDRegressor
@@ -22,14 +20,13 @@ from torch.utils.data import Dataset, DataLoader
 from logger.logger_singleton import getLogger
 from utils.utils import safe_literal_eval, to_native_types
 from pydantic import BaseModel
-from fastapi import APIRouter, UploadFile, File
 from evaluation import evaluate_model
-from backtester_core import BACKTEST_STATUS_PATH, run_backtest_streaming
-from fastapi import APIRouter
 from backtester_api import router as backtest_router
-
-import uuid
+from shared_options.services.utils import to_native_types, safe_literal_eval
+from pathlib import Path
+from fastapi.encoders import jsonable_encoder
 from starlette.middleware.base import BaseHTTPMiddleware
+import asyncio
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -346,212 +343,219 @@ def append_accumulated_data_append_only(new_df: pd.DataFrame):
 # -----------------------------
 # Upload endpoint (streaming + ijson)
 # -----------------------------
-@app.post("/train/upload")
+
+router = APIRouter()
+logger = getLogger()
+
+# -------------------------
+# In-memory store for progress
+# -------------------------
+upload_progress = {}  # key: upload_id, value: dict with processed counts etc.
+
+
+@router.websocket("/ws/progress/{upload_id}")
+async def websocket_progress(ws: WebSocket, upload_id: str):
+    await ws.accept()
+    try:
+        while True:
+            if upload_id in upload_progress:
+                progress_data = upload_progress[upload_id].copy()
+                await ws.send_json(progress_data)
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.logMessage(f"WebSocket closed for {upload_id}: {e}")
+
+
+def log_progress_ws(upload_id: str, processed: int, message="Processed", total: int = None):
+    """Update progress dictionary for WebSocket clients."""
+    start_time = upload_progress[upload_id].get("start_time", time.time())
+    elapsed = time.time() - start_time
+    rate = processed / elapsed if elapsed > 0 else 0
+    eta = (total - processed) / rate if total and rate > 0 else None
+
+    upload_progress[upload_id].update({
+        "processed": processed,
+        "rate_per_s": rate,
+        "message": message,
+        "eta": eta,
+        "timestamp": time.time()
+    })
+    # Also log to standard logger occasionally
+    if processed % LOG_EVERY_N == 0:
+        eta_str = f", ETA: {eta:.1f}s" if eta else ""
+        logger.logMessage(f"{message}: {processed}, Rate: {rate:.1f}/s{eta_str}")
+
+
+@router.post("/train/upload")
 async def upload_training_data(file: UploadFile = File(...), auto_train: bool = Form(default=True)):
     """
-    Stream a potentially huge JSON file to disk, stream-parse with ijson,
-    group into sequences, compute targets, and append to accumulated CSV in chunks.
+    Streaming-safe upload with live WebSocket progress reporting.
     """
+    upload_id = str(uuid.uuid4())
+    upload_progress[upload_id] = {"processed": 0, "rate_per_s": 0, "message": "Starting", "start_time": time.time()}
+
+    tmp_upload = TRAINING_DIR / "_upload_tmp_training.json"
+
     try:
         ensure_training_dir()
-        tmp_upload = TRAINING_DIR / f"_upload_tmp_training.json"
-        # 1) Save upload to disk (streamed)
+
+        # -------------------
+        # Stream upload to disk
+        # -------------------
+        uploaded_bytes = 0
+        total_bytes = file.headers.get("content-length")
         with open(tmp_upload, "wb") as fw:
             while chunk := await file.read(1024 * 1024):
                 fw.write(chunk)
+                uploaded_bytes += len(chunk)
+                pct = (uploaded_bytes / int(total_bytes) * 100) if total_bytes else None
+                upload_progress[upload_id].update({"message": f"Uploading: {pct:.1f}%" if pct else "Uploading..."})
 
-        # 2) Stream-parse and group by osiKey using pandas grouping on the fly:
-        # We'll read file with ijson.items and accumulate per-osiKey rows into an in-memory buffer sized by unique osiKey,
-        # but to avoid huge memory we flush once buffer size exceeds a threshold by building processed entries and writing CSV chunk.
-        #
-        # Strategy:
-        #  - Make a generator that yields raw entries (the uploaded JSON is expected to be list of snapshot rows OR list of per-option objects).
-        #  - If snapshots (flat rows with osiKey), we group by osiKey using an on-disk temporary SQLite table to avoid large memory usage.
-        #
-        # Detect whether uploaded file contains per-option entries (each item has 'sequence') or snapshot-level rows
+        logger.logMessage(f"Upload saved to disk: {tmp_upload}")
+
+        # -------------------
+        # Peek first item to detect type
+        # -------------------
         is_per_option = False
         with open(tmp_upload, "rb") as fr:
-            parser = ijson.parse(fr)
-            # find the first meaningful item shape quickly
-            first_item = None
-            for prefix, event, value in parser:
-                if prefix == "" and event == "start_array":
-                    continue
-                if event == "start_map":
-                    # read the map into a dict (use ijson.items to avoid reading entire file)
-                    first_item = True  # we know there's at least an object; we'll inspect more below
-                    break
-            # fall back: assume snapshots if not clearly per-option
-            fr.seek(0)
-
-        # We will use a small SQLite temp table to group snapshots by osiKey if file is snapshots list.
-        # If uploaded items already have 'sequence' key, we directly flatten them to CSV using flatten_entry_for_training.
-        # We'll peek one item to see if it contains 'sequence'.
-        with open(tmp_upload, "rb") as fr:
-            items = ijson.items(fr, "item")
-            # peek one safely
             try:
-                first = next(items)
+                first_item = next(ijson.items(fr, "item"))
+                if first_item and isinstance(first_item, dict) and "sequence" in first_item:
+                    is_per_option = True
             except StopIteration:
-                first = None
-            # check shape
-            if first and isinstance(first, dict) and "sequence" in first:
-                is_per_option = True
-            # rewind by reopening iterator
-        # reopen for real processing
-        with open(tmp_upload, "rb") as fr:
-            items = ijson.items(fr, "item")
-            # If it's per-option entries (sequence already assembled), process directly
-            if is_per_option:
-                logger.logMessage("Upload detected per-option entries (contains 'sequence'). Streaming processing...")
-                def gen_per_option():
-                    processed = 0
-                    skipped = 0
-                    for item in ijson.items(open(tmp_upload, "rb"), "item"):
+                return jsonable_encoder({"status": "error", "message": "Uploaded file is empty"})
+
+        # -------------------
+        # Generators with WebSocket progress
+        # -------------------
+        def gen_per_option():
+            processed = 0
+            skipped = 0
+            for item in ijson.items(open(tmp_upload, "rb"), "item"):
+                try:
+                    seq = item.get("sequence")
+                    if isinstance(seq, str):
+                        seq = safe_literal_eval(seq) or []
+                    pred_ret, pred_hold = compute_end_of_life_targets(seq)
+                    first_snap = seq[0] if seq else {}
+                    row = {
+                        "osiKey": item.get("osiKey") or first_snap.get("osiKey"),
+                        "strikePrice": float(item.get("strikePrice", first_snap.get("strikePrice", 0.0) or 0.0)),
+                        "optionType": int(item.get("optionType", first_snap.get("optionType", 0) or 0)),
+                        "moneyness": float(item.get("moneyness", first_snap.get("moneyness", 0.0) or 0.0)),
+                        "predicted_return": float(pred_ret),
+                        "predicted_hold_days": int(pred_hold),
+                        "sequence": seq
+                    }
+                    processed += 1
+                    if processed % LOG_EVERY_N == 0:
+                        log_progress_ws(upload_id, processed, "Per-option entries processed")
+                    yield row
+                except Exception as e:
+                    skipped += 1
+                    logger.logMessage(f"⚠️ Skipping malformed per-option upload item: {e}")
+                    continue
+
+        def gen_snapshot():
+            tmp_sqlite = TRAINING_DIR / f"_upload_snapshots_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+            conn = sqlite3.connect(tmp_sqlite)
+            cur = conn.cursor()
+            cols = ["osiKey TEXT", "timestamp TEXT"] + [f"{c} TEXT" for c in FEATURE_COLUMNS]
+            cur.execute(f"CREATE TABLE snaps ({', '.join(cols)})")
+            conn.commit()
+
+            inserted = 0
+            skipped = 0
+            for item in ijson.items(open(tmp_upload, "rb"), "item"):
+                try:
+                    osi = item.get("osiKey")
+                    ts = item.get("timestamp")
+                    vals = [str(item.get(c, "")) for c in FEATURE_COLUMNS]
+                    cur.execute(f"INSERT INTO snaps VALUES ({', '.join(['?'] * (2 + len(FEATURE_COLUMNS)))})",
+                                [osi, ts] + vals)
+                    inserted += 1
+                    if inserted % LOG_EVERY_N == 0:
+                        conn.commit()
+                        log_progress_ws(upload_id, inserted, "Snapshot rows inserted")
+                except Exception as e:
+                    skipped += 1
+                    logger.logMessage(f"⚠️ Skipping malformed snapshot upload item: {e}")
+            conn.commit()
+
+            buffer_by_osi = {}
+            processed = 0
+            for chunk_df in pd.read_sql_query("SELECT * FROM snaps ORDER BY osiKey, timestamp", conn, chunksize=50_000):
+                for _, r in chunk_df.iterrows():
+                    osi = r["osiKey"]
+                    if osi is None:
+                        continue
+                    snap = {"timestamp": r["timestamp"]}
+                    for c in FEATURE_COLUMNS:
+                        raw = r[c]
                         try:
-                            # each item already has sequence => compute targets and yield flat row
-                            # but items may already have predicted targets; we recompute to be consistent
-                            seq = item.get("sequence")
-                            if isinstance(seq, str):
-                                seq = safe_literal_eval(seq) or []
-                            pred_ret, pred_hold = compute_end_of_life_targets(seq)
-                            first_snap = seq[0] if seq else {}
+                            snap[c] = float(raw) if raw not in (None, "", "None") else 0.0
+                        except Exception:
+                            snap[c] = 0.0
+                    buffer_by_osi.setdefault(osi, []).append(snap)
+                    if len(buffer_by_osi) > 5000:
+                        for k in list(buffer_by_osi.keys())[:1000]:
+                            seq = buffer_by_osi.pop(k)
+                            pr, ph = compute_end_of_life_targets(seq)
+                            first = seq[0] if seq else {}
                             row = {
-                                "osiKey": item.get("osiKey") or first_snap.get("osiKey"),
-                                "strikePrice": float(item.get("strikePrice", first_snap.get("strikePrice", 0.0) or 0.0)),
-                                "optionType": int(item.get("optionType", first_snap.get("optionType", 0) or 0)),
-                                "moneyness": float(item.get("moneyness", first_snap.get("moneyness", 0.0) or 0.0)),
-                                "predicted_return": float(pred_ret),
-                                "predicted_hold_days": int(pred_hold),
+                                "osiKey": k,
+                                "strikePrice": float(first.get("strikePrice", 0.0)),
+                                "optionType": int(first.get("optionType", 0) or 0),
+                                "moneyness": float(first.get("moneyness", 0.0) or 0.0),
+                                "predicted_return": float(pr),
+                                "predicted_hold_days": int(ph),
                                 "sequence": seq
                             }
                             processed += 1
                             if processed % LOG_EVERY_N == 0:
-                                logger.logMessage(f"Uploaded per-option entries processed: {processed}")
+                                log_progress_ws(upload_id, processed, "Grouped snapshot entries processed")
                             yield row
-                        except Exception as e:
-                            skipped += 1
-                            logger.logMessage(f"⚠️ Skipping malformed per-option upload item: {e}")
-                            continue
-                written = save_rows_to_csv_stream(gen_per_option(), TRAINING_DIR / f"_upload_processed_training.csv", chunk_size=5000)
-                if written:
-                    df_chunk = pd.read_csv(TRAINING_DIR / f"_upload_processed_training.csv")
-                    append_accumulated_data_append_only(df_chunk)
-                    # cleanup handled by save_rows_to_csv_stream
-            else:
-                # Snapshot-level rows: we need to group them per osiKey -> build sequences
-                logger.logMessage("Upload detected snapshot-level rows. Grouping by osiKey using temporary SQLite table (streaming)...")
-                # create temp sqlite db to bulk insert snapshots (avoids keeping all in memory)
-                tmp_sqlite = TRAINING_DIR / f"_upload_snapshots_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-                conn = sqlite3.connect(tmp_sqlite)
-                cur = conn.cursor()
-                # create table matching snapshot schema minimally: osiKey, timestamp, and feature columns as TEXT (we'll store values)
-                cols = ["osiKey TEXT", "timestamp TEXT"] + [f"{c} TEXT" for c in FEATURE_COLUMNS]  # store as TEXT, cast later
-                cur.execute(f"CREATE TABLE snaps ({', '.join(cols)})")
-                conn.commit()
-                # insert rows streamed
-                insert_sql = f"INSERT INTO snaps VALUES ({', '.join(['?'] * (2 + len(FEATURE_COLUMNS)))})"
-                inserted = 0
-                with open(tmp_upload, "rb") as f_in:
-                    for item in ijson.items(f_in, "item"):
-                        try:
-                            osi = item.get("osiKey")
-                            ts = item.get("timestamp")
-                            vals = [str(item.get(c, "")) for c in FEATURE_COLUMNS]
-                            cur.execute(insert_sql, [osi, ts] + vals)
-                            inserted += 1
-                            if inserted % LOG_EVERY_N == 0:
-                                conn.commit()
-                                logger.logMessage(f"Inserted {inserted} snapshot rows into temp DB")
-                        except Exception as e:
-                            logger.logMessage(f"⚠️ Skipping malformed snapshot upload item: {e}")
-                            continue
-                conn.commit()
-                # Now read grouped sequences from sqlite in streaming fashion using SQL (order by osiKey, timestamp)
-                q = "SELECT * FROM snaps ORDER BY osiKey, timestamp"
-                # use pandas read_sql_query with chunksize to avoid memory spike
-                seq_rows = []
-                last_osi = None
-                processed = 0
-                chunk_iter = pd.read_sql_query(q, conn, chunksize=50_000)
-                def grouped_generator():
-                    nonlocal processed
-                    buffer_by_osi = {}
-                    for chunk_df in chunk_iter:
-                        # each chunk_df has columns: osiKey, timestamp, FEATURE_COLUMNS as text
-                        for _, r in chunk_df.iterrows():
-                            osi = r["osiKey"]
-                            if osi is None:
-                                continue
-                            # build snapshot
-                            snap = {"timestamp": r["timestamp"]}
-                            for c in FEATURE_COLUMNS:
-                                raw = r[c]
-                                try:
-                                    snap[c] = float(raw) if raw not in (None, "", "None") else 0.0
-                                except Exception:
-                                    snap[c] = 0.0
-                            if osi not in buffer_by_osi:
-                                buffer_by_osi[osi] = []
-                            buffer_by_osi[osi].append(snap)
-                            # flush if buffer too large (many OSIs)
-                            if len(buffer_by_osi) > 50000:
-                                # flush some OSIs
-                                for k in list(buffer_by_osi.keys())[:10000]:
-                                    seq = buffer_by_osi.pop(k)
-                                    pr, ph = compute_end_of_life_targets(seq)
-                                    first = seq[0] if seq else {}
-                                    row = {
-                                        "osiKey": k,
-                                        "strikePrice": float(first.get("strikePrice", 0.0)),
-                                        "optionType": int(first.get("optionType", 0) or 0),
-                                        "moneyness": float(first.get("moneyness", 0.0) or 0.0),
-                                        "predicted_return": float(pr),
-                                        "predicted_hold_days": int(ph),
-                                        "sequence": seq
-                                    }
-                                    processed += 1
-                                    if processed % LOG_EVERY_N == 0:
-                                        logger.logMessage(f"Grouped and processed {processed} osiKeys from temp DB")
-                                    yield row
-                    # flush remaining
-                    for k, seq in buffer_by_osi.items():
-                        pr, ph = compute_end_of_life_targets(seq)
-                        first = seq[0] if seq else {}
-                        row = {
-                            "osiKey": k,
-                            "strikePrice": float(first.get("strikePrice", 0.0)),
-                            "optionType": int(first.get("optionType", 0) or 0),
-                            "moneyness": float(first.get("moneyness", 0.0) or 0.0),
-                            "predicted_return": float(pr),
-                            "predicted_hold_days": int(ph),
-                            "sequence": seq
-                        }
-                        processed += 1
-                        if processed % LOG_EVERY_N == 0:
-                            logger.logMessage(f"Grouped and processed {processed} osiKeys from temp DB")
-                        yield row
-                # stream to CSV
-                written = save_rows_to_csv_stream(grouped_generator(), TRAINING_DIR / f"_upload_processed_training.csv", chunk_size=5000)
-                if written:
-                    df_chunk = pd.read_csv(TRAINING_DIR / f"_upload_processed_training.csv")
-                    append_accumulated_data_append_only(df_chunk)
-                conn.close()
-                tmp_sqlite.unlink(missing_ok=True)
+            # flush remaining
+            for k, seq in buffer_by_osi.items():
+                pr, ph = compute_end_of_life_targets(seq)
+                first = seq[0] if seq else {}
+                row = {
+                    "osiKey": k,
+                    "strikePrice": float(first.get("strikePrice", 0.0)),
+                    "optionType": int(first.get("optionType", 0) or 0),
+                    "moneyness": float(first.get("moneyness", 0.0) or 0.0),
+                    "predicted_return": float(pr),
+                    "predicted_hold_days": int(ph),
+                    "sequence": seq
+                }
+                processed += 1
+                if processed % LOG_EVERY_N == 0:
+                    log_progress_ws(upload_id, processed, "Grouped snapshot entries processed")
+                yield row
+            conn.close()
+            tmp_sqlite.unlink(missing_ok=True)
 
-        tmp_upload.unlink(missing_ok=True)
-        logger.logMessage("✅ Upload processing complete")
+        # -------------------
+        # Save to CSV streaming
+        # -------------------
+        if is_per_option:
+            save_rows_to_csv_stream(gen_per_option(), ACCUMULATED_DATA_PATH, chunk_size=5000)
+        else:
+            save_rows_to_csv_stream(gen_snapshot(), ACCUMULATED_DATA_PATH, chunk_size=5000)
+        logger.logMessage("✅ Upload processing complete and appended to accumulated CSV")
 
-        # Optional: auto_train
+        # -------------------
+        # Optional auto_train
+        # -------------------
         if auto_train:
             res = train_hybrid_model_streamed(ACCUMULATED_DATA_PATH, batch_size=BATCH_SIZE, throttle_delay=0.0, device=DEVICE)
             return res
 
-        return jsonable_encoder(to_native_types({"status": "appended"}))
+        return jsonable_encoder({"status": "appended", "upload_id": upload_id})
 
     except Exception as e:
-        logger.logMessage(f"Upload error: {e}")
-        return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
+        logger.logMessage(f"❌ Upload error [Server Side]: {e}")
+        return jsonable_encoder({"status": "error", "message": str(e)})
 
 # -----------------------------
 # Dataset for training: reads CSV chunk and builds padded sequence matrices

@@ -110,7 +110,7 @@ def upload_to_ai_server_csv_sequence(generator, auto_train=True):
         return result
 
     except requests.exceptions.RequestException as e:
-        logger.logMessage(f"Upload error: {e}")
+        logger.logMessage(f"Upload error[Client Side]: {e}")
         return {"status": "error", "message": str(e)}
 
 
