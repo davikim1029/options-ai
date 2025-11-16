@@ -37,7 +37,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 logger = getLogger()
 app = FastAPI(title="Hybrid AI Model Service (Seq Transformer)")
+router = APIRouter()
 app.include_router(backtest_router)
+app.include_router(router)
 app.add_middleware(RequestIDMiddleware)
 
 
@@ -339,18 +341,11 @@ def append_accumulated_data_append_only(new_df: pd.DataFrame):
     logger.logMessage(f"📈 Accumulated dataset now has {total} rows.")
     return ACCUMULATED_DATA_PATH, len(new_df)
 
-# -----------------------------
-# Upload endpoint (streaming + ijson)
-# -----------------------------
-
-router = APIRouter()
-logger = getLogger()
 
 # -------------------------
 # In-memory store for progress
 # -------------------------
 upload_progress = {}  # key: upload_id, value: dict with processed counts etc.
-
 
 @router.websocket("/ws/progress/{upload_id}")
 async def websocket_progress(ws: WebSocket, upload_id: str):
