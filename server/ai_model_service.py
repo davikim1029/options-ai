@@ -12,13 +12,13 @@ import torch
 from torch.utils.data import DataLoader
 import contextlib
 from logger.logger_singleton import getLogger
-from utils.utils import safe_literal_eval, to_native_types
+from utils.utils import safe_literal_eval, to_native_types,load_model,TrainerType
 from constants import (
-    TRAINING_DIR, FEATURE_COLUMNS, TARGET_COLUMNS, MAX_SEQ_LEN_CAP, LOG_EVERY_N,
-    DEVICE, BATCH_SIZE, ACCUMULATED_DATA_PATH
+    TRAINING_DIR, FEATURE_COLUMNS, TARGET_COLUMNS, MAX_SEQ_LEN_CAP,
+    DEVICE, ACCUMULATED_DATA_PATH
 )
-from training import (
-    load_existing_model, sequence_to_matrix, SequenceDataset,
+from sgd.sgd_training import (
+    sequence_to_matrix, SequenceDataset,
     compute_end_of_life_targets
 )
 
@@ -53,26 +53,15 @@ app.include_router(sgd_upload_router)
 app.include_router(mlp_backtest_router)
 app.include_router(mlp_upload_router)
 
-# -----------------------------
-# Shared Helpers
-# -----------------------------
-def load_model_and_scaler_dynamic(model_type="hybrid"):
-    """
-    Load model/scaler dynamically by type: 'hybrid', 'sgd', or 'mlp'.
-    """
-    model_dict, scaler = load_existing_model(model_type=model_type)
-    if model_dict is None:
-        raise RuntimeError(f"{model_type} model not trained yet.")
-    return model_dict, scaler
 
 def sequence_to_tensor(sequence: list, max_seq_len: int):
     seq_len = min(len(sequence), max_seq_len)
     seq_mat = sequence_to_matrix(sequence, max_seq_len)
     return torch.tensor(seq_mat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-def predict_single(features: dict = None, sequence: list = None, model_type: str = "hybrid"):
+def predict_single(features: dict = None, sequence: list = None, modelType:TrainerType = TrainerType.MLP):
     try:
-        model_dict, scaler = load_model_and_scaler_dynamic(model_type)
+        model_dict, scaler = load_model(modelType)
     except RuntimeError as e:
         return {"status": "error", "message": str(e)}
 
@@ -122,8 +111,8 @@ def predict_single(features: dict = None, sequence: list = None, model_type: str
 # -----------------------------
 # CSV Evaluation / Backtesting
 # -----------------------------
-def evaluate_on_csv(csv_path: Path, batch_size: int = 128, model_type: str = "hybrid"):
-    model_dict, scaler = load_model_and_scaler_dynamic(model_type)
+def evaluate_on_csv(csv_path: Path, batch_size: int = 128, model_type:TrainerType = TrainerType.MLP):
+    model_dict, scaler = load_model(model_type)
     transformer = model_dict.get("transformer", None)
 
     mse_list = []; mse_hold_list = []
@@ -190,8 +179,8 @@ def evaluate_on_csv(csv_path: Path, batch_size: int = 128, model_type: str = "hy
         "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
     }
 
-def backtest_on_csv(csv_path: Path, entry_threshold: float = 0.05, capital_per_trade: float = 1000.0, model_type="hybrid"):
-    model_dict, scaler = load_model_and_scaler_dynamic(model_type)
+def backtest_on_csv(csv_path: Path, entry_threshold: float = 0.05, capital_per_trade: float = 1000.0, model_type:TrainerType = TrainerType.MLP):
+    model_dict, scaler = load_model(model_type)
     transformer = model_dict.get("transformer", None)
 
     pnl_list = []; returns_list = []; wins = 0; losses = 0; trades = 0
