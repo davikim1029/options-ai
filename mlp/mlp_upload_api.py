@@ -11,7 +11,7 @@ import numpy as np
 import asyncio
 from logger.logger_singleton import getLogger
 from constants import TRAINING_DIR, LOG_EVERY_N, FEATURE_COLUMNS, TARGET_COLUMNS, DEVICE, BATCH_SIZE
-from mlp_trainer import train_mlp_from_permutations
+from mlp.mlp_trainer import train_mlp_from_permutations
 
 logger = getLogger()
 router = APIRouter()
