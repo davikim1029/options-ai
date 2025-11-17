@@ -1,31 +1,17 @@
 # pipeline.py
 # Current file directory
-import os
-from pathlib import Path
-here = os.path.dirname(os.path.abspath(__file__))
-# Go up one level (from options-alert to options) and then into option-file-server
-db_path = os.path.join(here, "..", "option-file-server", "database", "options.db")
 
-DB_PATH = os.path.normpath(db_path)
-TRAINING_DIR = Path("training")
 import sqlite3
 import pandas as pd
 import requests
 from datetime import datetime
 from shared_options.log.logger_singleton import getLogger
-from training import transform_for_fusion_streaming
+from sgd.sgd_training import transform_for_fusion_streaming
 from utils.utils import write_sequence_streaming
+from constants import (DB_PATH,MIN_NEW_OPTIONS,AI_SERVER_PORT,TRAINING_DIR)
 
 logger = getLogger()
 
-# -----------------------------
-# Configuration
-# -----------------------------
-
-AI_SERVER_PORT = 8100
-MIN_NEW_OPTIONS = 20  # number of new completed options before creating a file
-
-TRAINING_DIR.mkdir(exist_ok=True)
 
 # -----------------------------
 # Helper Functions

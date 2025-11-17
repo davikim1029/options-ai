@@ -11,8 +11,10 @@ from fastapi.encoders import jsonable_encoder
 from datetime import datetime,timezone
 from torch.utils.data import Dataset,DataLoader
 from pathlib import Path
-from constants import LOG_EVERY_N,FEATURE_COLUMNS,BATCH_SIZE,DEVICE,MAX_SEQ_LEN_CAP,HIDDEN_DIM,TARGET_COLUMNS,LEARNING_RATE,NUM_LAYERS,MODEL_PATH,SCALER_PATH,MODEL_DIR
-from utils.utils import safe_literal_eval,to_native_types
+from constants import (LOG_EVERY_N,FEATURE_COLUMNS,BATCH_SIZE
+                       ,DEVICE,MAX_SEQ_LEN_CAP,HIDDEN_DIM,TARGET_COLUMNS
+                       ,LEARNING_RATE,NUM_LAYERS)
+from utils.utils import safe_literal_eval,to_native_types,save_model
 from shared_options.log.logger_singleton import getLogger
 
 logger = getLogger()
@@ -382,27 +384,6 @@ def train_hybrid_model_streamed(csv_path: Path, batch_size=BATCH_SIZE, throttle_
     logger.logMessage(f"🎯 Streamed hybrid training complete: {total_rows} rows processed")
 
     return jsonable_encoder(to_native_types({"status": "trained", "rows": int(total_rows)}))
-
-
-# -----------------------------
-# Save / Load helpers
-# -----------------------------
-def load_existing_model():
-    if MODEL_PATH.exists() and SCALER_PATH.exists():
-        model = joblib.load(MODEL_PATH)
-        scaler = joblib.load(SCALER_PATH)
-        return model, scaler
-    return None, None
-
-def save_model(model, scaler):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_file = MODEL_DIR / f"model_{timestamp}.pkl"
-    scaler_file = MODEL_DIR / f"scaler_{timestamp}.pkl"
-    joblib.dump(model, model_file)
-    joblib.dump(scaler, scaler_file)
-    model_file.replace(MODEL_PATH)
-    scaler_file.replace(SCALER_PATH)
-    logger.logMessage(f"Saved hybrid model -> {model_file}")
 
 
 # -----------------------------

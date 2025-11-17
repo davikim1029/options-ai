@@ -1,7 +1,8 @@
+#sgd_backtester_api.py
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 from pathlib import Path
-from backtester_core import run_backtest_streaming, _backtest_lock
+from sgd.sgd_backtester_core import run_backtest_streaming, _backtest_lock
 from shared_options.log.logger_singleton import getLogger
 import threading
 import os
@@ -50,7 +51,7 @@ def start_backtest(
 
 @router.get("/status")
 def get_backtest_status():
-    from backtester_core import BACKTEST_STATUS_PATH
+    from sgd.sgd_backtester_core import BACKTEST_STATUS_PATH
     import json
 
     if not BACKTEST_STATUS_PATH.exists():

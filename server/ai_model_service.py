@@ -1,26 +1,38 @@
-# ai_server.py  (FULL production-ready rewrite - drop-in replacement)
+# ai_server.py  (Refactored drop-in)
 import uuid
 import json
 import math
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from fastapi import FastAPI, Body
-from fastapi.encoders import jsonable_encoder
-import torch
-from torch import nn
-from torch.utils.data import DataLoader
-from logger.logger_singleton import getLogger
-from utils.utils import safe_literal_eval, to_native_types
-from evaluation import evaluate_model
-from backtester_api import router as backtest_router
-from upload_api import router as upload_router
-from pathlib import Path
+from fastapi import FastAPI, Body, APIRouter
 from fastapi.encoders import jsonable_encoder
 from starlette.middleware.base import BaseHTTPMiddleware
-from training import load_existing_model,sequence_to_matrix,SequenceDataset,compute_end_of_life_targets
-from constants import TRAINING_DIR,FEATURE_COLUMNS,TARGET_COLUMNS,MAX_SEQ_LEN_CAP,LOG_EVERY_N,DEVICE,BATCH_SIZE,HIDDEN_DIM,NUM_LAYERS,LEARNING_RATE,ACCUMULATED_DATA_PATH
+import torch
+from torch.utils.data import DataLoader
+import contextlib
+from logger.logger_singleton import getLogger
+from utils.utils import safe_literal_eval, to_native_types
+from constants import (
+    TRAINING_DIR, FEATURE_COLUMNS, TARGET_COLUMNS, MAX_SEQ_LEN_CAP, LOG_EVERY_N,
+    DEVICE, BATCH_SIZE, ACCUMULATED_DATA_PATH
+)
+from training import (
+    load_existing_model, sequence_to_matrix, SequenceDataset,
+    compute_end_of_life_targets
+)
 
+# Include SGD + MLP routers
+from sgd.sgd_backtester_api import router as sgd_backtest_router
+from sgd.sgd_upload_api import router as sgd_upload_router
+from mlp.mlp_backtester_api import router as mlp_backtest_router
+from mlp.mlp_upload_api import router as mlp_upload_router
+
+logger = getLogger()
+
+# -----------------------------
+# Middleware for Request IDs
+# -----------------------------
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         request.state.request_id = str(uuid.uuid4())
@@ -29,60 +41,69 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-logger = getLogger()
-app = FastAPI(title="Hybrid AI Model Service (Seq Transformer)")
-app.include_router(backtest_router)
-app.include_router(upload_router)
+# -----------------------------
+# FastAPI app setup
+# -----------------------------
+app = FastAPI(title="Option AI Model Service")
 app.add_middleware(RequestIDMiddleware)
 
-# -----------------------------
-# Predict helper (single snapshot or with optional sequence)
-# -----------------------------
-def predict_option(features: dict = None, sequence: list = None):
-    """
-    Predict using current hybrid model.
-    - features: dict of FEATURE_COLUMNS (single snapshot)
-    - sequence: optional list of snapshots (chronological). If provided, used directly (padded/truncated).
-    If sequence absent, we repeat features into a padded sequence.
-    """
-    model_dict, scaler = load_existing_model()
-    if model_dict is None:
-        return {"status": "error", "message": "Model not trained yet."}
-    sgd = model_dict["sgd"]
-    transformer = model_dict["transformer"].to(DEVICE).eval()
+# Include all routers
+app.include_router(sgd_backtest_router)
+app.include_router(sgd_upload_router)
+app.include_router(mlp_backtest_router)
+app.include_router(mlp_upload_router)
 
-    # ensure features exists
+# -----------------------------
+# Shared Helpers
+# -----------------------------
+def load_model_and_scaler_dynamic(model_type="hybrid"):
+    """
+    Load model/scaler dynamically by type: 'hybrid', 'sgd', or 'mlp'.
+    """
+    model_dict, scaler = load_existing_model(model_type=model_type)
+    if model_dict is None:
+        raise RuntimeError(f"{model_type} model not trained yet.")
+    return model_dict, scaler
+
+def sequence_to_tensor(sequence: list, max_seq_len: int):
+    seq_len = min(len(sequence), max_seq_len)
+    seq_mat = sequence_to_matrix(sequence, max_seq_len)
+    return torch.tensor(seq_mat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+
+def predict_single(features: dict = None, sequence: list = None, model_type: str = "hybrid"):
+    try:
+        model_dict, scaler = load_model_and_scaler_dynamic(model_type)
+    except RuntimeError as e:
+        return {"status": "error", "message": str(e)}
+
+    # Single snapshot
     if features is None and (not sequence or len(sequence) == 0):
         return {"status": "error", "message": "No features or sequence provided."}
     if features is None and sequence:
         features = sequence[0]
-    # build X_flat
+
     x_flat = np.array([float(features.get(f, 0) or 0.0) for f in FEATURE_COLUMNS], dtype=np.float32).reshape(1, -1)
-    # load scaler
-    _, scaler = load_existing_model()
-    if scaler is None:
-        return {"status": "error", "message": "Scaler not found."}
-    x_scaled = scaler.transform(x_flat)
-    sgd_pred = float(sgd.predict(x_scaled)[0])
+    x_scaled = scaler.transform(x_flat) if scaler else x_flat
 
-    # build sequence matrix
-    # derive max_seq_len from transformer
-    max_seq_len = getattr(transformer, "max_seq_len", min(64, MAX_SEQ_LEN_CAP))
-    if sequence and isinstance(sequence, list) and len(sequence) > 0:
-        seq = sequence
+    sgd_pred = float(model_dict["sgd"].predict(x_scaled)[0]) if "sgd" in model_dict else 0.0
+
+    transformer = model_dict.get("transformer", None)
+    max_seq_len = getattr(transformer, "max_seq_len", min(64, MAX_SEQ_LEN_CAP)) if transformer else len(sequence or [features])
+
+    seq_to_use = sequence if sequence and len(sequence) > 0 else [features] * max_seq_len
+    X_tensor = sequence_to_tensor(seq_to_use, max_seq_len) if transformer else None
+
+    if transformer:
+        transformer.eval()
+        with torch.no_grad():
+            tr_pred, th_pred = transformer(X_tensor)
+            tr_val = float(tr_pred.item())
+            th_val = float(th_pred.item())
     else:
-        # repeat the single snapshot to form a pseudo-sequence
-        seq = [features] * max_seq_len
-    seq_len = min(len(seq), max_seq_len)
-    seq_mat = sequence_to_matrix(seq, max_seq_len)  # returns (max_seq_len, F)
-    X_tensor = torch.tensor(seq_mat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+        tr_val = 0.0
+        th_val = 0.0
 
-    with torch.no_grad():
-        tr_pred, th_pred = transformer(X_tensor)
-        tr_val = float(tr_pred.item())
-        th_val = float(th_pred.item())
-
-    final_return = float((sgd_pred + tr_val) / 2.0)
+    final_return = float((sgd_pred + tr_val) / 2.0) if transformer and "sgd" in model_dict else float(sgd_pred + tr_val)
     final_hold = float(th_val)
     signal = "BUY" if final_return > 0.05 else "SELL" if final_return < -0.05 else "HOLD"
 
@@ -99,16 +120,13 @@ def predict_option(features: dict = None, sequence: list = None):
     }
 
 # -----------------------------
-# Evaluation & backtesting endpoints (streaming)
+# CSV Evaluation / Backtesting
 # -----------------------------
-def evaluate_on_csv(csv_path: Path, batch_size: int = 128):
-    model_dict, scaler = load_existing_model()
-    if model_dict is None:
-        return {"status": "error", "message": "Model not trained yet."}
-    transformer = model_dict["transformer"].to(DEVICE).eval()
+def evaluate_on_csv(csv_path: Path, batch_size: int = 128, model_type: str = "hybrid"):
+    model_dict, scaler = load_model_and_scaler_dynamic(model_type)
+    transformer = model_dict.get("transformer", None)
 
-    mse_list = []
-    mse_hold_list = []
+    mse_list = []; mse_hold_list = []
     tp = fp = tn = fn = 0
     total = 0
 
@@ -119,19 +137,27 @@ def evaluate_on_csv(csv_path: Path, batch_size: int = 128):
         chunk = chunk.dropna(subset=FEATURE_COLUMNS + TARGET_COLUMNS).reset_index(drop=True)
         if chunk.empty:
             continue
-        ds = SequenceDataset(chunk, getattr(transformer, "max_seq_len", min(64, MAX_SEQ_LEN_CAP)))
-        dl = DataLoader(ds, batch_size=batch_size)
+
+        ds = SequenceDataset(chunk, getattr(transformer, "max_seq_len", min(64, MAX_SEQ_LEN_CAP))) if transformer else None
+        dl = DataLoader(ds, batch_size=batch_size) if ds else [([chunk[FEATURE_COLUMNS].to_numpy()], [chunk[TARGET_COLUMNS].to_numpy()])]
+
         with torch.no_grad():
-            for X_batch, y_batch in dl:
-                X_batch = X_batch.to(DEVICE)
-                y_batch = y_batch.to(DEVICE)
-                pr, ph = transformer(X_batch)
-                pr = pr.detach().cpu().numpy().astype(float)
-                ph = ph.detach().cpu().numpy().astype(float)
-                tr = y_batch[:,0].cpu().numpy().astype(float)
-                th = y_batch[:,1].cpu().numpy().astype(float)
+            for batch in dl:
+                if transformer:
+                    X_batch, y_batch = batch
+                    X_batch = X_batch.to(DEVICE)
+                    y_batch = y_batch.to(DEVICE)
+                    pr, ph = transformer(X_batch)
+                    pr, ph = pr.cpu().numpy(), ph.cpu().numpy()
+                    tr, th = y_batch[:,0].cpu().numpy(), y_batch[:,1].cpu().numpy()
+                else:
+                    X, y = batch
+                    pr, ph = np.zeros_like(y[:,0]), np.zeros_like(y[:,1])
+                    tr, th = y[:,0], y[:,1]
+
                 mse_list.append(((pr - tr) ** 2).mean())
                 mse_hold_list.append(((ph - th) ** 2).mean())
+
                 pred_up = pr > 0.0
                 true_up = tr > 0.0
                 for pu, tu in zip(pred_up, true_up):
@@ -140,10 +166,11 @@ def evaluate_on_csv(csv_path: Path, batch_size: int = 128):
                     elif not pu and not tu: tn += 1
                     elif not pu and tu: fn += 1
                 total += len(pr)
+
     mse_return = float(np.mean(mse_list)) if mse_list else None
     mse_hold = float(np.mean(mse_hold_list)) if mse_hold_list else None
-    rmse_return = float(math.sqrt(mse_return)) if mse_return is not None else None
-    rmse_hold = float(math.sqrt(mse_hold)) if mse_hold is not None else None
+    rmse_return = math.sqrt(mse_return) if mse_return is not None else None
+    rmse_hold = math.sqrt(mse_hold) if mse_hold is not None else None
     accuracy = (tp + tn) / total if total > 0 else None
     precision = tp / (tp + fp) if (tp + fp) > 0 else None
     recall = tp / (tp + fn) if (tp + fn) > 0 else None
@@ -163,37 +190,29 @@ def evaluate_on_csv(csv_path: Path, batch_size: int = 128):
         "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
     }
 
-def backtest_on_csv(csv_path: Path, entry_threshold: float = 0.05, capital_per_trade: float = 1000.0):
-    model_dict, scaler = load_existing_model()
-    if model_dict is None:
-        return {"status": "error", "message": "Model not trained yet."}
-    transformer = model_dict["transformer"].to(DEVICE).eval()
+def backtest_on_csv(csv_path: Path, entry_threshold: float = 0.05, capital_per_trade: float = 1000.0, model_type="hybrid"):
+    model_dict, scaler = load_model_and_scaler_dynamic(model_type)
+    transformer = model_dict.get("transformer", None)
 
     pnl_list = []; returns_list = []; wins = 0; losses = 0; trades = 0
 
     for chunk in pd.read_csv(csv_path, chunksize=50_000):
         if "sequence" not in chunk.columns:
-            logger.logMessage("Backtest requires 'sequence' column; skipping chunk")
+            logger.logMessage(f"{model_type} backtest requires 'sequence' column; skipping chunk")
             continue
         for _, row in chunk.iterrows():
             try:
                 seq_raw = row["sequence"]
-                if isinstance(seq_raw, str):
-                    seq = safe_literal_eval(seq_raw) or json.loads(seq_raw)
-                elif isinstance(seq_raw, list):
-                    seq = seq_raw
-                else:
-                    seq = []
-                if not seq:
-                    continue
-                # prepare tensor
+                seq = safe_literal_eval(seq_raw) or json.loads(seq_raw) if isinstance(seq_raw, str) else seq_raw
+                if not seq: continue
                 max_seq_len = getattr(transformer, "max_seq_len", min(64, MAX_SEQ_LEN_CAP))
-                mat = sequence_to_matrix(seq, max_seq_len)
-                X_tensor = torch.tensor(mat, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-                with torch.no_grad():
-                    pr, ph = transformer(X_tensor)
-                    pred = float(pr.item())
-                actual_ret, actual_hold = compute_end_of_life_targets(seq)
+                X_tensor = sequence_to_tensor(seq, max_seq_len) if transformer else None
+
+                with torch.no_grad() if transformer else contextlib.nullcontext():
+                    pr, _ = transformer(X_tensor) if transformer else (0.0, 0.0)
+                    pred = float(pr.item() if transformer else pr)
+
+                actual_ret, _ = compute_end_of_life_targets(seq)
                 if pred >= entry_threshold:
                     profit = capital_per_trade * actual_ret
                     pnl_list.append(profit)
@@ -231,57 +250,41 @@ def backtest_on_csv(csv_path: Path, entry_threshold: float = 0.05, capital_per_t
     }
 
 # -----------------------------
-# Endpoints for evaluate/confusion/backtest/predict_one
+# Endpoints
 # -----------------------------
-
 @app.get("/confusion")
 def confusion_endpoint():
     try:
         if not ACCUMULATED_DATA_PATH.exists():
-            return jsonable_encoder(to_native_types({"status": "error", "message": "No accumulated data found."}))
+            return jsonable_encoder({"status": "error", "message": "No accumulated data found."})
         metrics = evaluate_on_csv(ACCUMULATED_DATA_PATH, batch_size=128)
         return jsonable_encoder(to_native_types(metrics.get("confusion", {})))
     except Exception as e:
         logger.logMessage(f"Confusion error: {e}")
-        return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
+        return jsonable_encoder({"status": "error", "message": str(e)})
 
 @app.post("/predict_one")
-async def predict_one(feature: dict = Body(...)):
+async def predict_one(feature: dict = Body(...), model_type: str = Body("hybrid")):
     try:
-        # normalize to FEATURE_COLUMNS
         features = {f: feature.get(f, 0) for f in FEATURE_COLUMNS}
         sequence = feature.get("sequence", None)
-        res = predict_option(features=features, sequence=sequence)
+        res = predict_single(features=features, sequence=sequence, model_type=model_type)
         return jsonable_encoder(to_native_types(res))
     except Exception as e:
         logger.logMessage(f"Predict_one error: {e}")
-        return jsonable_encoder(to_native_types({"status": "error", "message": str(e)}))
-
-
-@app.get("/evaluate")
-def evaluate_endpoint(batch_size: int = 128):
-    try:
-        df = load_accumulated_training_csvs(chunk_size=batch_size)
-        metrics = evaluate_model(df, batch_size=batch_size)
-        return {"status": "success", "metrics": metrics}
-    except Exception as e:
-        logger.logMessage(f"Evaluate error: {e}")
-        return {"status": "error", "message": str(e)}
+        return jsonable_encoder({"status": "error", "message": str(e)})
 
 # -----------------------------
-# Load all accumulated CSVs in training dir
+# CSV Loader
 # -----------------------------
 def load_accumulated_training_csvs(chunk_size=25_000):
-    """Load all CSVs from TRAINING_DIR in RAM-safe chunks."""
     all_files = sorted(Path(TRAINING_DIR).glob("*.csv"))
     if not all_files:
         raise RuntimeError(f"No training CSVs found in {TRAINING_DIR}")
 
-    # Concatenate all CSVs into one DataFrame safely
     dfs = []
     for f in all_files:
         for chunk in pd.read_csv(f, chunksize=chunk_size):
             dfs.append(chunk)
-
     df = pd.concat(dfs, ignore_index=True)
     return df

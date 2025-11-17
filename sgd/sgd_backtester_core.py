@@ -1,16 +1,17 @@
-# backtester_core.py (REPLACEMENT FOR run_backtest_streaming)
+# sgd_backtester_core.py
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import json
 import os
-from evaluation import load_model_and_scaler, EVAL_FEATURES
+from utils.utils import load_model
 from ast import literal_eval
 from threading import Lock, get_ident
 from shared_options.log.logger_singleton import getLogger
 from fastapi import Request
 import traceback
+from constants import FEATURE_COLUMNS,TrainerType
 
 BACKTEST_STATUS_PATH = Path("model_store/backtest_status.json")
 _backtest_lock = Lock()
@@ -55,7 +56,7 @@ def compute_actual_outcome(sequence):
 def extract_features(row):
     """Extract scalar model features from row using EVAL_FEATURES."""
     feats = []
-    for col in EVAL_FEATURES:
+    for col in FEATURE_COLUMNS:
         try:
             feats.append(float(row.get(col, 0.0)))
         except:
@@ -92,7 +93,7 @@ def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: in
         logger.logMessage(f"[request_id={req_id}] Starting Backtest Streaming")
         begin_backtest_status()
 
-        model, scaler = load_model_and_scaler()
+        model, scaler = load_model(TrainerType.SGD)
 
         total_options = 0
         buys = 0
@@ -111,7 +112,7 @@ def run_backtest_streaming(csv_path: Path, batch_size: int = 128, total_rows: in
             chunk_index += 1
 
             # Required columns for this backtester
-            required = {"sequence"} | set(EVAL_FEATURES)
+            required = {"sequence"} | set(FEATURE_COLUMNS)
             missing = required - set(chunk.columns)
             if missing:
                 err = f"CSV missing required columns: {missing}"

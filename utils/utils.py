@@ -6,6 +6,7 @@ from shared_options.log.logger_singleton import getLogger
 import ast
 import numpy as np
 import json
+from constants import get_model_path,get_scalar_path
 
 
 def save_csv_safely(data, output_path, chunksize=25_000, delay=0.2, logger=None):
@@ -114,3 +115,72 @@ def write_sequence_streaming(path, generator, logger=None):
             first = False
 
         f.write("]")
+
+
+# evaluation.py
+import pandas as pd
+import joblib
+import numpy as np
+from pathlib import Path
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from constants import TrainerType
+
+import joblib
+from pathlib import Path
+from datetime import datetime
+import shutil
+
+MODEL_STORE = Path("model_store")
+CURRENT_DIR = MODEL_STORE / "current"
+ARCHIVE_DIR = MODEL_STORE / "archive"
+
+CURRENT_DIR.mkdir(parents=True, exist_ok=True)
+ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+def save_model(model, scaler, model_type:TrainerType=TrainerType.MLP, keep_last_n=10):
+    """
+    Save model/scaler with timestamp, update current, archive old ones.
+    
+    Args:
+        model: sklearn / MLP model object
+        scaler: scaler object
+        model_type: "mlp" or "sgd"
+        keep_last_n: number of archived versions to retain
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_file = ARCHIVE_DIR / f"{model_type}_model_{timestamp}.pkl"
+    scaler_file = ARCHIVE_DIR / f"{model_type}_scaler_{timestamp}.pkl"
+
+    # Save to archive first
+    joblib.dump(model, model_file)
+    joblib.dump(scaler, scaler_file)
+
+    # Update "current" symlinks or replace files
+    current_model = get_model_path(model_type)
+    current_scaler = get_scalar_path(model_type)
+    shutil.copy(model_file, current_model)
+    shutil.copy(scaler_file, current_scaler)
+
+    # Clean old archives
+    archived_models = sorted(ARCHIVE_DIR.glob(f"{model_type}_model_*.pkl"), reverse=True)
+    archived_scalers = sorted(ARCHIVE_DIR.glob(f"{model_type}_scaler_*.pkl"), reverse=True)
+
+    for old_file in archived_models[keep_last_n:]:
+        old_file.unlink()
+    for old_file in archived_scalers[keep_last_n:]:
+        old_file.unlink()
+
+    print(f"[{timestamp}] Saved {model_type} model & scaler -> current, archived {len(archived_models)} versions")
+    return current_model, current_scaler
+
+def load_model(type:TrainerType=TrainerType.MLP):
+    """
+    Load the current model/scaler.
+    """
+    current_model = get_model_path(type)
+    current_scaler = get_scalar_path(type)
+    if not current_model.exists() or not current_scaler.exists():
+        raise FileNotFoundError(f"No current {TrainerType.MLP.name} model/scaler found.")
+    model = joblib.load(current_model)
+    scaler = joblib.load(current_scaler)
+    return model, scaler
