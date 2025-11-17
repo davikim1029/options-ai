@@ -13,7 +13,7 @@ from fastapi.encoders import jsonable_encoder
 import asyncio
 from pathlib import Path
 from constants import TRAINING_DIR, LOG_EVERY_N, FEATURE_COLUMNS, ACCUMULATED_DATA_PATH,BATCH_SIZE,DEVICE,TARGET_COLUMNS
-from training import compute_end_of_life_targets,train_hybrid_model_streamed
+from sgd.sgd_training import compute_end_of_life_targets,train_hybrid_model_streamed
 from utils.utils import to_native_types
 import json
 import numpy as np
