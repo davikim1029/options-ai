@@ -5,8 +5,8 @@ import numpy as np
 from pathlib import Path
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-MODEL_PATH = Path("model_store/model.pkl")
-SCALER_PATH = Path("model_store/scaler.pkl")
+MODEL_PATH = Path("models/versions/current_model.pkl")
+SCALER_PATH = Path("models/versions/current_scaler.pkl")
 
 EVAL_FEATURES = [
     "optionType","strikePrice","lastPrice","bid","ask","bidSize","askSize",
