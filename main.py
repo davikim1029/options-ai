@@ -22,7 +22,7 @@ from mlp.mlp_upload_api import upload_training_data
 # -----------------------------
 # Server & PID setup
 # -----------------------------
-PID_FILE = Path("ai_model_server.pid")
+PID_FILE = Path("server.ai_model_server.pid")
 MODEL_SERVER_SCRIPT = "ai_model_service:app"  # FastAPI server module
 
 UVICORN_CMD = [
