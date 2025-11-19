@@ -22,8 +22,8 @@ from mlp.mlp_upload_api import upload_training_data
 # -----------------------------
 # Server & PID setup
 # -----------------------------
-PID_FILE = Path("server.ai_model_server.pid")
-MODEL_SERVER_SCRIPT = "ai_model_service:app"  # FastAPI server module
+PID_FILE = Path("server/ai_model_server.pid")
+MODEL_SERVER_SCRIPT = "server.ai_model_service:app"  # FastAPI server module
 
 UVICORN_CMD = [
     sys.executable, "-m", "uvicorn",
@@ -34,7 +34,7 @@ UVICORN_CMD = [
 ]
 
 logger = getLogger()
-log_file = Path("ai_model_server.log")
+log_file = Path("server/ai_model_server.log")
 for handler in logger.logger.handlers:
     if isinstance(handler, FileHandler):
         log_file = Path(handler.baseFilename)
