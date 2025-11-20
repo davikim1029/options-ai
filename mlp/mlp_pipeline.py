@@ -1,4 +1,4 @@
-# mlp_pipeline.py
+# mlp_pipeline.py (updated robust upload)
 import os
 from pathlib import Path
 import sqlite3
@@ -14,13 +14,26 @@ logger = getLogger()
 # -----------------------------
 # Configuration
 # -----------------------------
-
 AI_SERVER_PORT = 8100
 MIN_NEW_ROWS = 100  # number of new completed permutations before creating a file
 
 # -----------------------------
-# Helper Functions
+# Helpers
 # -----------------------------
+def sanitize_json_item(item):
+    """
+    Recursively sanitize all strings in a dict/list structure.
+    Escapes newlines (\n -> \\n) and carriage returns (\r -> \\r)
+    """
+    if isinstance(item, str):
+        return item.replace("\n", "\\n").replace("\r", "\\r")
+    elif isinstance(item, dict):
+        return {k: sanitize_json_item(v) for k, v in item.items()}
+    elif isinstance(item, list):
+        return [sanitize_json_item(v) for v in item]
+    else:
+        return item
+
 def fetch_new_permutations(threshold=MIN_NEW_ROWS):
     """Fetch unprocessed rows from option_permutations table"""
     conn = sqlite3.connect(DB_PATH)
@@ -50,7 +63,6 @@ def fetch_new_permutations(threshold=MIN_NEW_ROWS):
 
     return df
 
-
 def mark_permutations_processed(df):
     """Mark permutations as processed in DB"""
     if df is None or df.empty:
@@ -70,31 +82,26 @@ def mark_permutations_processed(df):
     conn.commit()
     conn.close()
 
-
-
 def upload_to_ai_server(df: pd.DataFrame, auto_train=True):
-    """
-    Upload dataframe to AI server (MLP-ready).
-    Ensures all string fields are sanitized (no newlines or carriage returns).
-    """
+    """Upload dataframe to AI server (MLP-ready) safely"""
     url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
+    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     temp_file = TRAINING_DIR / "_upload_tmp_permutations.json"
 
-    def sanitize_text_fields(row: dict) -> dict:
-        """Remove newlines and carriage returns from string fields that can break JSONL."""
-        for k, v in row.items():
-            if isinstance(v, str):
-                row[k] = v.replace("\n", "").replace("\r", "")
-        return row
-
     try:
-        # Convert dataframe rows to JSONL safely
+        # Convert dataframe rows to JSON lines safely
         with temp_file.open("w", encoding="utf-8") as f:
             for row in df.to_dict(orient="records"):
-                safe_row = sanitize_text_fields(to_native_types(row))
-                f.write(json.dumps(safe_row, ensure_ascii=False) + "\n")
+                # Convert to native types
+                safe_row = to_native_types(row)
 
-        # Upload the file to AI server
+                # Recursively sanitize strings
+                safe_row = sanitize_json_item(safe_row)
+
+                # Write JSON line
+                f.write(json.dumps(safe_row) + "\n")
+
+        # Upload file
         with temp_file.open("rb") as f:
             files = {"file": f}
             payload = {"auto_train": str(auto_train).lower()}
@@ -109,11 +116,6 @@ def upload_to_ai_server(df: pd.DataFrame, auto_train=True):
     except requests.exceptions.RequestException as e:
         logger.logMessage(f"Upload error[Client Side]: {e}")
         return {"status": "error", "message": str(e)}
-    except Exception as e:
-        logger.logMessage(f"❌ Upload error [Server Side]: {e}")
-        return {"status": "error", "message": str(e)}
-
-
 
 # -----------------------------
 # Main Pipeline
