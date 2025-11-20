@@ -6,8 +6,8 @@ from threading import Lock, get_ident
 from pathlib import Path
 import os
 from shared_options.log.logger_singleton import getLogger
-from utils.utils import load_model, FEATURE_COLUMNS
-from constants import DB_PATH, BATCH_SIZE
+from utils.utils import load_model
+from constants import DB_PATH, BATCH_SIZE, FEATURE_COLUMNS
 
 BACKTEST_STATUS_PATH = Path("model_store/mlp_backtest_status.json")
 _backtest_lock = Lock()
