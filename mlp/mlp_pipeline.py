@@ -71,18 +71,30 @@ def mark_permutations_processed(df):
     conn.close()
 
 
+
 def upload_to_ai_server(df: pd.DataFrame, auto_train=True):
-    """Upload dataframe to AI server (MLP-ready)"""
+    """
+    Upload dataframe to AI server (MLP-ready).
+    Ensures all string fields are sanitized (no newlines or carriage returns).
+    """
     url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
     temp_file = TRAINING_DIR / "_upload_tmp_permutations.json"
 
+    def sanitize_text_fields(row: dict) -> dict:
+        """Remove newlines and carriage returns from string fields that can break JSONL."""
+        for k, v in row.items():
+            if isinstance(v, str):
+                row[k] = v.replace("\n", "").replace("\r", "")
+        return row
+
     try:
-        # Convert dataframe rows to JSON lines
+        # Convert dataframe rows to JSONL safely
         with temp_file.open("w", encoding="utf-8") as f:
             for row in df.to_dict(orient="records"):
-                # ensure JSON-serializable types
-                f.write(json.dumps(to_native_types(row)) + "\n")
+                safe_row = sanitize_text_fields(to_native_types(row))
+                f.write(json.dumps(safe_row, ensure_ascii=False) + "\n")
 
+        # Upload the file to AI server
         with temp_file.open("rb") as f:
             files = {"file": f}
             payload = {"auto_train": str(auto_train).lower()}
@@ -97,6 +109,10 @@ def upload_to_ai_server(df: pd.DataFrame, auto_train=True):
     except requests.exceptions.RequestException as e:
         logger.logMessage(f"Upload error[Client Side]: {e}")
         return {"status": "error", "message": str(e)}
+    except Exception as e:
+        logger.logMessage(f"❌ Upload error [Server Side]: {e}")
+        return {"status": "error", "message": str(e)}
+
 
 
 # -----------------------------
