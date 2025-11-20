@@ -83,40 +83,59 @@ def mark_permutations_processed(df):
     conn.close()
 
 def upload_to_ai_server(df: pd.DataFrame, auto_train=True):
-    """Upload dataframe to AI server (MLP-ready) safely"""
+    """Upload dataframe to AI server (MLP-ready) as a proper JSON array."""
     url = f"http://127.0.0.1:{AI_SERVER_PORT}/train/upload"
-    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     temp_file = TRAINING_DIR / "_upload_tmp_permutations.json"
 
     try:
-        # Convert dataframe rows to JSON lines safely
+        # -------------------
+        # Ensure TRAINING_DIR exists
+        # -------------------
+        TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+
+        # -------------------
+        # Convert DataFrame to JSON array safely
+        # -------------------
+        records = []
+        for row in df.to_dict(orient="records"):
+            row = to_native_types(row)
+            # Strip newlines from string fields (especially osiKey)
+            for k, v in row.items():
+                if isinstance(v, str):
+                    row[k] = v.replace('\n', '').replace('\r', '')
+            records.append(row)
+
         with temp_file.open("w", encoding="utf-8") as f:
-            for row in df.to_dict(orient="records"):
-                # Convert to native types
-                safe_row = to_native_types(row)
+            # Dump entire list as a single JSON array
+            import json
+            json.dump(records, f, ensure_ascii=False)
 
-                # Recursively sanitize strings
-                safe_row = sanitize_json_item(safe_row)
-
-                # Write JSON line
-                f.write(json.dumps(safe_row) + "\n")
-
+        # -------------------
         # Upload file
+        # -------------------
         with temp_file.open("rb") as f:
             files = {"file": f}
             payload = {"auto_train": str(auto_train).lower()}
+            import requests
             resp = requests.post(url, files=files, data=payload)
             resp.raise_for_status()
             result = resp.json()
 
+        # -------------------
+        # Cleanup
+        # -------------------
         temp_file.unlink(missing_ok=True)
         logger.logMessage(f"AI server upload complete. Response: {result}")
         return result
 
     except requests.exceptions.RequestException as e:
-        logger.logMessage(f"Upload error[Client Side]: {e}")
+        logger.logMessage(f"Upload error [Client Side]: {e}")
         return {"status": "error", "message": str(e)}
-
+    except Exception as e:
+        logger.logMessage(f"Upload error [Server Side]: {e}")
+        return {"status": "error", "message": str(e)}
+        
+        
 # -----------------------------
 # Main Pipeline
 # -----------------------------
