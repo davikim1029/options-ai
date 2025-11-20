@@ -1,13 +1,13 @@
 # mlp_backtester_core.py
 import sqlite3
-from pathlib import Path
 import json
 import traceback
 from threading import Lock, get_ident
-from shared_options.log.logger_singleton import getLogger
-from utils.utils import load_model  
-import numpy as np
+from pathlib import Path
 import os
+from shared_options.log.logger_singleton import getLogger
+from utils.utils import load_model, FEATURE_COLUMNS
+from constants import DB_PATH, BATCH_SIZE
 
 BACKTEST_STATUS_PATH = Path("model_store/mlp_backtest_status.json")
 _backtest_lock = Lock()
@@ -16,7 +16,7 @@ LOG_EVERY_N = 500  # log every N rows
 
 
 # -----------------------------
-# Status Helpers
+# Status helpers
 # -----------------------------
 def safe_write_status(data: dict):
     BACKTEST_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -32,50 +32,38 @@ def finalize_backtest_status(results: dict):
 
 
 # -----------------------------
-# Helper Functions
+# Feature extraction
 # -----------------------------
+def extract_features(row, feature_columns=FEATURE_COLUMNS):
+    """Extract numeric feature vector for MLP."""
+    row_dict = dict(row)
+    return [float(row_dict.get(f, 0.0)) for f in feature_columns]
+
+
 def compute_actual_outcome(row):
-    """Compute realized PnL and hold period from a permutation row."""
-    try:
-        entry_price = float(row.get("entryPrice", 0.0))
-        exit_price = float(row.get("exitPrice", entry_price))
-        profit = exit_price - entry_price
-        hold_days = int(row.get("holdDays", 1))
-        return profit, hold_days
-    except Exception:
-        return 0.0, 0
-
-
-def extract_features(row, feature_columns):
-    """Extract numeric feature vector for MLP from a row."""
-    feats = []
-    for col in feature_columns:
-        try:
-            feats.append(float(row.get(col, 0.0)))
-        except Exception:
-            feats.append(0.0)
-    return feats
+    """Compute realized PnL and hold period."""
+    row_dict = dict(row)
+    entry_price = float(row_dict.get("entryPrice", 0.0))
+    exit_price = float(row_dict.get("exitPrice", entry_price))
+    profit = exit_price - entry_price
+    hold_days = int(row_dict.get("holdDays", 1))
+    return profit, hold_days
 
 
 # -----------------------------
-# Streaming Backtester for MLP
+# Streaming backtester
 # -----------------------------
-def run_backtest_permutations(db_path: Path, batch_size: int = 128, fastapi_request=None):
-    """
-    Streaming backtester for MLP trained on option_permutations.
-    Reads DB in chunks, computes realized vs predicted PnL/hold days.
-    """
+def run_backtest_permutations(db_path=DB_PATH, batch_size=BATCH_SIZE, fastapi_request=None):
     pid = os.getpid()
     tid = get_ident()
     req_id = getattr(fastapi_request.state, "request_id", "no-request") if fastapi_request else "no-request"
-
     logger.logMessage(f"[request_id={req_id}] PID={pid} Thread={tid} Entered MLP Backtester")
 
-    # Acquire lock
     acquired = _backtest_lock.acquire(blocking=False)
     if not acquired:
         return {"error": "Another backtest is already running."}
 
+    conn = None
     try:
         begin_backtest_status()
         model, scaler, feature_columns = load_model()
@@ -88,14 +76,8 @@ def run_backtest_permutations(db_path: Path, batch_size: int = 128, fastapi_requ
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
 
-        # Determine total rows for progress
-        try:
-            total_rows = conn.execute("SELECT COUNT(*) FROM option_permutations").fetchone()[0]
-        except:
-            total_rows = None
-
+        total_rows = conn.execute("SELECT COUNT(*) FROM option_permutations").fetchone()[0]
         offset = 0
-        chunk_index = 0
 
         while True:
             rows = conn.execute(
@@ -104,35 +86,30 @@ def run_backtest_permutations(db_path: Path, batch_size: int = 128, fastapi_requ
             if not rows:
                 break
 
-            chunk_index += 1
+            offset += batch_size
 
             for row in rows:
-                row = dict(row)
                 total_options += 1
-
                 try:
                     actual_profit, actual_hold = compute_actual_outcome(row)
                     feats = extract_features(row, feature_columns)
-                    X = scaler.transform([feats])
-                    pred_return, pred_hold = model.predict(X)[0]
+                    X_scaled = scaler.transform([feats])
+                    pred_return, pred_hold = model.predict(X_scaled)[0]  # unpack
 
-                    if pred_return > 0.05:  # Buy threshold
+                    if pred_return > 0.05:  # buy threshold
                         buys += 1
                         pnl_total += actual_profit
                         if actual_profit > 0:
                             wins += 1
 
                 except Exception as e:
-                    logger.logMessage(f"⚠️ Skipping malformed row during backtest: {e}")
+                    logger.logMessage(f"⚠️ Skipping malformed row: {e}")
                     continue
 
-                # Log progress every LOG_EVERY_N rows
                 if total_options % LOG_EVERY_N == 0:
-                    progress = int((total_options / total_rows) * 100) if total_rows else 0
+                    progress = int((total_options / total_rows) * 100)
                     safe_write_status({"status": "running", "progress": progress, "results": None})
-                    logger.logMessage(f"[request_id={req_id}] Processed {total_options} rows, progress {progress}%")
-
-            offset += batch_size
+                    logger.logMessage(f"[request_id={req_id}] Processed {total_options}/{total_rows} rows ({progress}%)")
 
         win_rate = (wins / buys) if buys else 0.0
         avg_return = (pnl_total / buys) if buys else 0.0
@@ -142,7 +119,7 @@ def run_backtest_permutations(db_path: Path, batch_size: int = 128, fastapi_requ
             "buys": buys,
             "win_rate": win_rate,
             "avg_trade_return": avg_return,
-            "total_profit": pnl_total,
+            "total_profit": pnl_total
         }
 
         finalize_backtest_status(results)
@@ -157,4 +134,5 @@ def run_backtest_permutations(db_path: Path, batch_size: int = 128, fastapi_requ
         if acquired and _backtest_lock.locked():
             _backtest_lock.release()
             logger.logMessage(f"[request_id={req_id}] Released backtest lock")
-        conn.close()
+        if conn:
+            conn.close()

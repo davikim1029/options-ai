@@ -1,3 +1,4 @@
+# mlp_trainer.py
 import sqlite3
 import numpy as np
 from sklearn.preprocessing import StandardScaler
@@ -5,58 +6,53 @@ from sklearn.linear_model import SGDRegressor
 import joblib
 from pathlib import Path
 from shared_options.log.logger_singleton import getLogger
-from constants import (BATCH_SIZE,FEATURE_COLUMNS,TARGET_COLUMNS,DB_PATH,get_model_path,get_scalar_path, TrainerType)
+from constants import (
+    BATCH_SIZE, FEATURE_COLUMNS, TARGET_COLUMNS, DB_PATH,
+    get_model_path, get_scalar_path, TrainerType
+)
 
 logger = getLogger()
 
-# -----------------------------
-# Stream permutations in chunks
-# -----------------------------
-def stream_permutation_rows(db_path, batch_size=BATCH_SIZE):
-    """Generator yielding chunks of rows from option_permutations."""
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
 
-    # Use rowid to paginate
+# -----------------------------
+# Stream option_permutations in chunks
+# -----------------------------
+def stream_permutation_rows(db_path: Path, batch_size: int = BATCH_SIZE):
+    """Generator yielding rows in chunks from the option_permutations table."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
     last_rowid = 0
     while True:
-        c.execute(f"""
-            SELECT *
-            FROM option_permutations
-            WHERE rowid > ?
-            ORDER BY rowid ASC
-            LIMIT ?
-        """, (last_rowid, batch_size))
-        rows = c.fetchall()
+        rows = conn.execute(
+            "SELECT * FROM option_permutations WHERE rowid > ? ORDER BY rowid ASC LIMIT ?",
+            (last_rowid, batch_size)
+        ).fetchall()
         if not rows:
             break
-        last_rowid = rows[-1][0]  # rowid of last row in chunk
+
+        last_rowid = rows[-1]["rowid"]
         yield rows
 
     conn.close()
 
+
 # -----------------------------
-# Map rows to X, y arrays
+# Convert rows to numpy arrays
 # -----------------------------
 def rows_to_xy(rows, feature_cols=FEATURE_COLUMNS, target_cols=TARGET_COLUMNS):
-    """Convert SQLite rows to NumPy arrays for training."""
-    # Fetch column names from first row
-    col_names = [description[0] for description in rows[0]._fields] if hasattr(rows[0], "_fields") else None
-    X = []
-    y = []
-
-    for r in rows:
-        if col_names:
-            X.append([r[col_names.index(f)] for f in feature_cols])
-            y.append([r[col_names.index(t)] for t in target_cols])
-        else:
-            # fallback: assume table order matches FEATURE_COLS + TARGET_COLS
-            X.append([r[FEATURE_COLUMNS.index(f)+1] for f in feature_cols])  # +1 to skip osiKey
-            y.append([r[len(FEATURE_COLUMNS)+i+3] for i, t in enumerate(target_cols)])  # crude fallback
+    X, y = [], []
+    for row in rows:
+        row_dict = dict(row)
+        # Features
+        X.append([float(row_dict.get(f, 0.0)) for f in feature_cols])
+        # Targets
+        y.append([float(row_dict.get(t, 0.0)) for t in target_cols])
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
+
 # -----------------------------
-# Training loop
+# Incremental MLP training
 # -----------------------------
 def train_mlp_from_permutations(db_path=DB_PATH, batch_size=BATCH_SIZE):
     logger.logMessage("🚀 Starting incremental MLP training on option_permutations...")
@@ -77,8 +73,8 @@ def train_mlp_from_permutations(db_path=DB_PATH, batch_size=BATCH_SIZE):
         else:
             X_scaled = scaler.transform(X_chunk)
 
-        # Incremental fit
-        mlp_model.partial_fit(X_scaled, y_chunk[:, 0])  # assuming hold_time target
+        # Incremental fit (assuming first target is hold_time or main prediction)
+        mlp_model.partial_fit(X_scaled, y_chunk[:, 0])
 
         total_rows += len(X_chunk)
         logger.logMessage(f"Trained on chunk of {len(X_chunk)} rows | Total rows processed: {total_rows}")
@@ -88,5 +84,6 @@ def train_mlp_from_permutations(db_path=DB_PATH, batch_size=BATCH_SIZE):
     scaler_path = get_scalar_path(TrainerType.MLP)
     joblib.dump(mlp_model, model_path)
     joblib.dump(scaler, scaler_path)
+
     logger.logMessage(f"✅ Training complete. Model saved to {model_path}, scaler saved to {scaler_path}")
     return mlp_model, scaler
